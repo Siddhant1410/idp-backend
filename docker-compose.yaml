@@ -119,6 +119,7 @@ services:
       - idp-mysql
     networks:
       - idp_net
+      - default
 
 
   # Apache NiFi
@@ -141,8 +142,7 @@ services:
     restart: always
     networks:
       - idp_net
-
-
+      - default
 
 
   postgres:
