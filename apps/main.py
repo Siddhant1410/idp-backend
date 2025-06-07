@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import get_settings
 from apps.routes import ingestion  
 from apps.routes import blueprint
+from apps.routes import process
 
 settings = get_settings()
 
@@ -24,6 +25,7 @@ app.add_middleware(
 #Routes Inclusions
 app.include_router(ingestion.router)
 app.include_router(blueprint.router)
+app.include_router(process.router)
 
 # Health check route
 @app.get("/health")

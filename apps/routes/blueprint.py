@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
-from apps.models.blueprint import Blueprint as BlueprintModel
+from apps.models.blueprints import Blueprint as BlueprintModel
 from apps.schemas.blueprint import BlueprintTriggerRequest, BlueprintResponse
 from apps.services.airflow_trigger import trigger_dag_run
 from core.db import get_db

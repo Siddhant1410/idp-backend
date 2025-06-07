@@ -1,1 +1,1 @@
-from .blueprint import Blueprint
+from .blueprints import Blueprint
