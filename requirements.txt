@@ -22,7 +22,7 @@ python-dotenv
 # ----------------------
 # OpenAI Integration
 # ----------------------
-openai
+openai==0.28
 
 # ----------------------
 # HTTP Requests
