@@ -117,6 +117,11 @@ def classify_documents(**context):
             results[file_name] = f"Error: {e}"
             print(f"❌ {file_name} → {e}")
 
+    # Save classification results to JSON for next DAG
+    with open(os.path.join(LOCAL_DOWNLOAD_DIR, "classified_documents.json"), "w") as f:
+        json.dump(results, f)
+        print("📝 Classification results saved to classified_documents.json")
+
 
     # Step 7: Deactivate the document types (mark isActive = 0)
     for doc_type in target_labels:
