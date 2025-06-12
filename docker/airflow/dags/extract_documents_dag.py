@@ -13,6 +13,8 @@ LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "extracted_fields.json")
 CLASSIFIED_JSON_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "classified_documents.json")
 
+
+
 openai.api_key = "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"
 
 def extract_text_from_pdf(pdf_path):
@@ -124,11 +126,49 @@ def extract_fields_from_documents(**context):
             "fields": extracted
         }
 
+    CLEANED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
+    def correct_typos_with_genai(extracted_data):
+        try:
+            prompt = f"""
+            You are a helpful assistant. The following JSON contains field names and their extracted values from OCR-scanned documents. Some values may contain spelling errors or artifacts.
+
+            Please review and return a corrected JSON with typos fixed only in the field values. 
+            Do not change the structure or field names. Return **only the corrected JSON** – no explanations or markdown.
+
+            JSON:
+            {json.dumps(extracted_data, indent=2)}
+            """
+
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                timeout=60
+            )
+            content = response["choices"][0]["message"]["content"].strip()
+
+            # Clean markdown markers if any
+            if content.startswith("```json"):
+                content = content.replace("```json", "").replace("```", "").strip()
+
+            return json.loads(content)
+
+        except Exception as e:
+            print(f"❌ GenAI typo correction failed: {e}")
+            return extracted_data  # fallback
+
+
     # Step 7: Save to file
     with open(EXTRACTED_FIELDS_PATH, "w") as f:
         json.dump(extracted_results, f, indent=2)
 
     print(f"✅ Extraction complete. Results saved to {EXTRACTED_FIELDS_PATH}")
+
+    # Step 8: Correct typos using GenAI
+    cleaned_data = correct_typos_with_genai(extracted_results)
+    with open(CLEANED_FIELDS_PATH, "w") as f:
+        json.dump(cleaned_data, f, indent=2)
+    print(f"✅ Cleaned data saved to {CLEANED_FIELDS_PATH}")
 
 
 
