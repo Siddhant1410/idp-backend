@@ -60,5 +60,7 @@ ruff
 apache-airflow-providers-mysql==4.0.0
 apache-airflow==2.8.1
 
+email-validator
+
 
 

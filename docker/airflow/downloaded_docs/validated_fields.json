@@ -1,0 +1,60 @@
+{
+  "0659507760226420190320151119_03052025125131.pdf": {
+    "documentType": "aadhar-card",
+    "average_score": 98.33,
+    "fields": {
+      "User Name": {
+        "score": 100,
+        "reason": "The extracted value \"Siddhant Sushilkumar Indave\" matches exactly with the name present in the OCR text, indicating a perfect extraction without any errors or discrepancies."
+      },
+      "User Address": {
+        "score": 95,
+        "reason": "The extracted address closely matches the OCR text with only minor formatting differences and no significant errors that alter the meaning. The presence and format of the address are consistent with the OCR text."
+      },
+      "Aadhar Number": {
+        "score": 100,
+        "reason": "The extracted Aadhaar Number \"6351 5846 8968\" is present in the OCR text and matches the expected format without any errors or discrepancies."
+      }
+    }
+  },
+  "20250607T071001095Z_Alteredmemorandumofassociation-25062021.pdf": {
+    "documentType": "moa",
+    "average_score": 100.0,
+    "fields": {
+      "Company Name": {
+        "score": 100,
+        "reason": "The extracted value \"FABINDIA OVERSEAS PRIVATE LIMITED\" matches exactly with the company name mentioned in the OCR text, indicating a perfect extraction without any discrepancies."
+      },
+      "Incorporation Date": {
+        "score": 0,
+        "reason": "Value marked as N/A \u2014 skipping validation"
+      },
+      "Authorized Signatory": {
+        "score": 0,
+        "reason": "Value marked as N/A \u2014 skipping validation"
+      },
+      "CIN": {
+        "score": 0,
+        "reason": "Value marked as N/A \u2014 skipping validation"
+      }
+    }
+  },
+  "545646654654546_7676566_009.pdf": {
+    "documentType": "pan-card",
+    "average_score": 100.0,
+    "fields": {
+      "PAN Name": {
+        "score": 100,
+        "reason": "The extracted value \"INDAVE SIDDHANT SUSHILKUMAR\" matches exactly with the name found in the OCR text, indicating that the extraction is accurate and adheres to the validation rules."
+      },
+      "PAN Number": {
+        "score": 100,
+        "reason": "The extracted PAN Number \"AKEPI0262N\" matches exactly with the value found in the OCR text, indicating correct extraction without any errors."
+      },
+      "Father's Name": {
+        "score": 100,
+        "reason": "The extracted value \"SUSHILKUMAR VAMANRAO INDAVE\" matches exactly with the Father's Name field in the OCR text, indicating correct extraction without any errors."
+      }
+    }
+  }
+}
