@@ -27,7 +27,7 @@ def highlight_fields():
 
         fields = doc_info.get("fields", {})
         doc_type = doc_info.get("document_type", "").lower()
-        values_to_highlight = [(k, v) for k, v in fields.items()]  # Keep field names for context
+        values_to_highlight = [(k, v) for k, v in fields.items()]
 
         print(f"📄 Processing {file_name} (Type: {doc_type})...")
 
@@ -36,13 +36,21 @@ def highlight_fields():
         highlighted_images = []
 
         for page_num, image in enumerate(images):
+            # Create a transparent overlay layer
+            overlay = Image.new('RGBA', image.size, (255, 255, 255, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            
+            # Original image (convert to RGB if needed)
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
             draw = ImageDraw.Draw(image)
+            
             ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
             
             # Get all OCR text with positions and confidence
             text_blocks = []
             for i in range(len(ocr_data["text"])):
-                if ocr_data["text"][i].strip() and int(ocr_data["conf"][i]) > 60:  # Filter low-confidence
+                if ocr_data["text"][i].strip() and int(ocr_data["conf"][i]) > 60:
                     text_blocks.append({
                         "text": ocr_data["text"][i].lower(),
                         "left": ocr_data["left"][i],
@@ -52,7 +60,6 @@ def highlight_fields():
                         "conf": int(ocr_data["conf"][i])
                     })
 
-            # Sort blocks by position (top to bottom, left to right)
             text_blocks.sort(key=lambda x: (x["top"], x["left"]))
 
             for field_name, val in values_to_highlight:
@@ -60,11 +67,15 @@ def highlight_fields():
                     continue
 
                 val_lower = val.lower()
-                val_words = re.findall(r'[a-z0-9]+', val_lower)  # More inclusive pattern
+                val_words = re.findall(r'[a-z0-9]+', val_lower)
                 n = len(val_words)
                 matched = False
 
-                # Strategy 1: Exact contiguous match (original approach)
+                # Very transparent yellow (10% opacity)
+                highlight_color = (255, 255, 102, 80)  # Light yellow with 10% opacity
+                outline_color = (255, 204, 0, 200)  # Slightly transparent border
+
+                # Strategy 1: Exact contiguous match
                 for i in range(len(text_blocks) - n + 1):
                     block_text = ' '.join(b["text"] for b in text_blocks[i:i+n])
                     if block_text == ' '.join(val_words):
@@ -73,10 +84,12 @@ def highlight_fields():
                         x_end = text_blocks[i+n-1]["left"] + text_blocks[i+n-1]["width"]
                         y_end = text_blocks[i+n-1]["top"] + text_blocks[i+n-1]["height"]
                         
-                        draw.rectangle(
+                        # Draw on overlay
+                        overlay_draw.rectangle(
                             [(x, y), (x_end, y_end)],
-                            outline="green",
-                            width=2
+                            fill=highlight_color,
+                            outline=outline_color,
+                            width=1
                         )
                         matched = True
                         print(f"✅ Exact match for {field_name}")
@@ -85,9 +98,8 @@ def highlight_fields():
                 if matched:
                     continue
 
-                # Strategy 2: Field-specific positional matching (for PAN, MOA)
+                # Strategy 2: Field-specific positional matching
                 if doc_type in ["pan", "moa"]:
-                    # Find field label first (e.g., "Name:", "Permanent Account Number")
                     label_pos = None
                     for i, block in enumerate(text_blocks):
                         if field_name.lower() in block["text"]:
@@ -95,15 +107,15 @@ def highlight_fields():
                             break
                     
                     if label_pos:
-                        # Look for nearest text block to the right/below the label
                         for block in text_blocks:
                             if (block["left"] > label_pos[0] and 
                                 abs(block["top"] - label_pos[1]) < label_pos[3] * 1.5):
-                                draw.rectangle(
+                                overlay_draw.rectangle(
                                     [(block["left"], block["top"]), 
                                      (block["left"] + block["width"], block["top"] + block["height"])],
-                                    outline="blue",
-                                    width=2
+                                    fill=highlight_color,
+                                    outline=(0, 102, 204, 200),  # Blue border
+                                    width=1
                                 )
                                 matched = True
                                 print(f"⚠️ Positional match for {field_name}")
@@ -112,10 +124,10 @@ def highlight_fields():
                 if matched:
                     continue
 
-                # Strategy 3: Partial/fuzzy matching with scoring
+                # Strategy 3: Partial/fuzzy matching
                 best_match = None
                 best_score = 0
-                min_match_length = max(3, len(val_words) // 2)  # Require at least half match for long fields
+                min_match_length = max(3, len(val_words) // 2)
 
                 for i in range(len(text_blocks) - min_match_length + 1):
                     match_length = min(len(val_words), len(text_blocks) - i)
@@ -130,38 +142,41 @@ def highlight_fields():
                     for j in range(match_length):
                         if val_words[j] == text_blocks[i+j]["text"]:
                             matched_words += 1
-                            # Expand bounding box
                             bounds["left"] = min(bounds["left"], text_blocks[i+j]["left"])
                             bounds["top"] = min(bounds["top"], text_blocks[i+j]["top"])
                             bounds["right"] = max(bounds["right"], text_blocks[i+j]["left"] + text_blocks[i+j]["width"])
                             bounds["bottom"] = max(bounds["bottom"], text_blocks[i+j]["top"] + text_blocks[i+j]["height"])
 
                     current_score = matched_words / len(val_words)
-                    if current_score > best_score and current_score > 0.5:  # At least 50% match
+                    if current_score > best_score and current_score > 0.5:
                         best_score = current_score
                         best_match = bounds
 
                 if best_match:
-                    draw.rectangle(
+                    overlay_draw.rectangle(
                         [(best_match["left"], best_match["top"]), 
                          (best_match["right"], best_match["bottom"])],
-                        outline="orange",
-                        width=2
+                        fill=highlight_color,
+                        outline=(255, 153, 51, 200),  # Orange border
+                        width=1
                     )
                     print(f"⚠️ Partial match ({int(best_score*100)}%) for {field_name}")
                     continue
 
-                # Final fallback: Highlight any single word matches
+                # Final fallback: Single word matches
                 for block in text_blocks:
                     if any(word == block["text"] for word in val_words):
-                        draw.rectangle(
+                        overlay_draw.rectangle(
                             [(block["left"], block["top"]), 
                              (block["left"] + block["width"], block["top"] + block["height"])],
-                            outline="red",
+                            fill=highlight_color,
+                            outline=(204, 51, 51, 200),  # Red border
                             width=1
                         )
                         print(f"⚠️ Single word match for {field_name}")
 
+            # Combine original image with overlay
+            image = Image.alpha_composite(image.convert('RGBA'), overlay).convert('RGB')
             highlighted_images.append(image)
 
         # Save images back as a new PDF
