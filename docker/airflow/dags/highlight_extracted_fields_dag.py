@@ -8,12 +8,35 @@ import img2pdf
 import os
 import json
 import re
+import requests
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
 HIGHLIGHTED_PDF_DIR = os.path.join(LOCAL_DOWNLOAD_DIR, "highlighted_docs")
+UPLOAD_URL = "http://69.62.81.68:3057/files"
 os.makedirs(HIGHLIGHTED_PDF_DIR, exist_ok=True)
+
+def upload_highlighted_pdfs():
+    if not os.path.exists(HIGHLIGHTED_PDF_DIR):
+        print("No highlighted PDF directory found.")
+        return
+
+    for filename in os.listdir(HIGHLIGHTED_PDF_DIR):
+        if not filename.lower().endswith(".pdf"):
+            continue
+
+        file_path = os.path.join(HIGHLIGHTED_PDF_DIR, filename)
+        try:
+            with open(file_path, "rb") as f:
+                files = {"file": (filename, f, "application/pdf")}
+                response = requests.post(UPLOAD_URL, files=files)
+                if response.status_code == 200:
+                    print(f"✅ Uploaded: {filename}")
+                else:
+                    print(f"❌ Failed to upload {filename}: {response.status_code} - {response.text}")
+        except Exception as e:
+            print(f"❌ Error uploading {filename}: {e}")
 
 def highlight_fields():
     with open(EXTRACTED_FIELDS_PATH, "r") as f:
@@ -72,7 +95,7 @@ def highlight_fields():
                 matched = False
 
                 # Very transparent yellow (10% opacity)
-                highlight_color = (255, 255, 102, 80)  # Light yellow with 10% opacity
+                highlight_color = (255, 255, 102, 100)  # Light yellow with 40% opacity
                 outline_color = (255, 204, 0, 200)  # Slightly transparent border
 
                 # Strategy 1: Exact contiguous match
@@ -188,6 +211,16 @@ def highlight_fields():
             format="PDF"
         )
         print(f"✅ Highlighted PDF saved: {output_pdf_path}")
+
+    #Upload the highlighted docs to server
+    upload_highlighted_pdfs()
+    for filename in os.listdir(HIGHLIGHTED_PDF_DIR):
+        file_path = os.path.join(HIGHLIGHTED_PDF_DIR, filename)
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+            print(filename, "is removed from local storage ✅")
+    
+
 
 # === DAG DEFINITION ===
 with DAG(
