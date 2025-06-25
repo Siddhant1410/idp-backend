@@ -9,6 +9,7 @@ import os
 import json
 import re
 import requests
+from airflow.providers.mysql.hooks.mysql import MySqlHook
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
@@ -16,6 +17,34 @@ EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fiel
 HIGHLIGHTED_PDF_DIR = os.path.join(LOCAL_DOWNLOAD_DIR, "highlighted_docs")
 UPLOAD_URL = "http://69.62.81.68:3057/files"
 os.makedirs(HIGHLIGHTED_PDF_DIR, exist_ok=True)
+
+def save_extracted_fields_to_db(process_id=None):
+    #process_id = context["dag_run"].conf.get("process_id")
+    if not process_id:
+        raise ValueError("Missing process_id parameter")
+    # if not process_id:
+    #     raise ValueError("Missing process_id in dag_run.conf")
+
+    if not os.path.exists(EXTRACTED_FIELDS_PATH):
+        raise FileNotFoundError("extracted_fields.json not found")
+
+    with open(EXTRACTED_FIELDS_PATH, "r") as f:
+        document_details = f.read()  # raw JSON string to store in DB
+
+    # Connect to DB
+    hook = MySqlHook(mysql_conn_id="idp_mysql")
+    conn = hook.get_conn()
+    cursor = conn.cursor()
+
+    # Insert or update into processinstancedocuments
+    cursor.execute("""
+        INSERT INTO ProcessInstanceDocuments (id, documentDetails, createdAt, updatedAt, isActive, isDeleted)
+        VALUES (%s, %s, NOW(), NOW(), 1, 0)
+        ON DUPLICATE KEY UPDATE documentDetails = VALUES(documentDetails), updatedAt = NOW()
+    """, (process_id, document_details))
+
+    conn.commit()
+    print(f"✅ Saved extracted_fields.json into processinstancedocuments for process_id={process_id}")
 
 def upload_highlighted_pdfs():
     if not os.path.exists(HIGHLIGHTED_PDF_DIR):
@@ -213,12 +242,17 @@ def highlight_fields():
         print(f"✅ Highlighted PDF saved: {output_pdf_path}")
 
     #Upload the highlighted docs to server
-    upload_highlighted_pdfs()
+    ##upload_highlighted_pdfs()
+    #Remove the highlighted docs from local storage
     for filename in os.listdir(HIGHLIGHTED_PDF_DIR):
         file_path = os.path.join(HIGHLIGHTED_PDF_DIR, filename)
         if os.path.isfile(file_path):
             os.remove(file_path)
             print(filename, "is removed from local storage ✅")
+    
+    #Save extracted fields to DB
+    process_id = "1"
+    save_extracted_fields_to_db(process_id)
     
 
 
@@ -234,4 +268,5 @@ with DAG(
     highlight_task = PythonOperator(
         task_id="highlight_extracted_fields",
         python_callable=highlight_fields
+        # provide_context=True
     )
