@@ -4,7 +4,6 @@ from datetime import datetime, timedelta
 import pytesseract
 from pdf2image import convert_from_path
 from PIL import Image, ImageDraw
-import img2pdf
 import os
 import json
 import re
@@ -13,93 +12,50 @@ from airflow.providers.mysql.hooks.mysql import MySqlHook
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
+CLEANED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
 HIGHLIGHTED_PDF_DIR = os.path.join(LOCAL_DOWNLOAD_DIR, "highlighted_docs")
+RESPONSE_BODY_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "response_body.json")
 UPLOAD_URL = "http://69.62.81.68:3057/files"
+
 os.makedirs(HIGHLIGHTED_PDF_DIR, exist_ok=True)
 
-def save_extracted_fields_to_db(process_id=None):
-    #process_id = context["dag_run"].conf.get("process_id")
+def highlight_and_upload(**context):
+    process_id = context["dag_run"].conf.get("process_id")
     if not process_id:
-        raise ValueError("Missing process_id parameter")
-    # if not process_id:
-    #     raise ValueError("Missing process_id in dag_run.conf")
+        raise ValueError("Missing process_id in dag_run.conf")
 
-    if not os.path.exists(EXTRACTED_FIELDS_PATH):
-        raise FileNotFoundError("extracted_fields.json not found")
+    # Load extracted fields
+    with open(CLEANED_FIELDS_PATH, "r") as f:
+        extracted_data = json.load(f)
 
-    with open(EXTRACTED_FIELDS_PATH, "r") as f:
-        document_details = f.read()  # raw JSON string to store in DB
+    response_json = []
 
-    # Connect to DB
-    hook = MySqlHook(mysql_conn_id="idp_mysql")
-    conn = hook.get_conn()
-    cursor = conn.cursor()
-
-    # Insert or update into processinstancedocuments
-    cursor.execute("""
-        INSERT INTO ProcessInstanceDocuments (id, documentDetails, createdAt, updatedAt, isActive, isDeleted)
-        VALUES (%s, %s, NOW(), NOW(), 1, 0)
-        ON DUPLICATE KEY UPDATE documentDetails = VALUES(documentDetails), updatedAt = NOW()
-    """, (process_id, document_details))
-
-    conn.commit()
-    print(f"✅ Saved extracted_fields.json into processinstancedocuments for process_id={process_id}")
-
-def upload_highlighted_pdfs():
-    if not os.path.exists(HIGHLIGHTED_PDF_DIR):
-        print("No highlighted PDF directory found.")
-        return
-
-    for filename in os.listdir(HIGHLIGHTED_PDF_DIR):
+    for filename in os.listdir(LOCAL_DOWNLOAD_DIR):
         if not filename.lower().endswith(".pdf"):
             continue
 
-        file_path = os.path.join(HIGHLIGHTED_PDF_DIR, filename)
-        try:
-            with open(file_path, "rb") as f:
-                files = {"file": (filename, f, "application/pdf")}
-                response = requests.post(UPLOAD_URL, files=files)
-                if response.status_code == 200:
-                    print(f"✅ Uploaded: {filename}")
-                else:
-                    print(f"❌ Failed to upload {filename}: {response.status_code} - {response.text}")
-        except Exception as e:
-            print(f"❌ Error uploading {filename}: {e}")
+        pdf_path = os.path.join(LOCAL_DOWNLOAD_DIR, filename)
+        print(f"📄 Processing {filename}")
 
-def highlight_fields():
-    with open(EXTRACTED_FIELDS_PATH, "r") as f:
-        extracted_data = json.load(f)
+        # Try to get matching extracted fields
+        matched = next((item for item in extracted_data if item.get("documentDetails", {}).get("documentName") == filename), None)
+        extracted_fields = matched.get("extractedFields", []) if matched else []
+        process_instance_id = matched.get("processInstanceId") if matched else process_id
 
-    for file_name, doc_info in extracted_data.items():
-        pdf_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
-        if not os.path.exists(pdf_path):
-            print(f"❌ Skipping missing file: {pdf_path}")
-            continue
-
-        fields = doc_info.get("fields", {})
-        doc_type = doc_info.get("document_type", "").lower()
-        values_to_highlight = [(k, v) for k, v in fields.items()]
-
-        print(f"📄 Processing {file_name} (Type: {doc_type})...")
-
-        # Convert PDF to images (1 image per page)
+        # Highlight logic
         images = convert_from_path(pdf_path)
         highlighted_images = []
 
         for page_num, image in enumerate(images):
-            # Create a transparent overlay layer
             overlay = Image.new('RGBA', image.size, (255, 255, 255, 0))
             overlay_draw = ImageDraw.Draw(overlay)
-            
-            # Original image (convert to RGB if needed)
+
             if image.mode != 'RGB':
                 image = image.convert('RGB')
+
             draw = ImageDraw.Draw(image)
-            
             ocr_data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-            
-            # Get all OCR text with positions and confidence
+
             text_blocks = []
             for i in range(len(ocr_data["text"])):
                 if ocr_data["text"][i].strip() and int(ocr_data["conf"][i]) > 60:
@@ -112,127 +68,31 @@ def highlight_fields():
                         "conf": int(ocr_data["conf"][i])
                     })
 
-            text_blocks.sort(key=lambda x: (x["top"], x["left"]))
-
-            for field_name, val in values_to_highlight:
-                if not val or val == "N/A":
+            for field in extracted_fields:
+                val = field.get("fieldValue", "")
+                val_words = re.findall(r'[a-z0-9]+', val.lower())
+                if not val_words:
                     continue
-
-                val_lower = val.lower()
-                val_words = re.findall(r'[a-z0-9]+', val_lower)
-                n = len(val_words)
-                matched = False
-
-                # Very transparent yellow (10% opacity)
-                highlight_color = (255, 255, 102, 100)  # Light yellow with 40% opacity
-                outline_color = (255, 204, 0, 200)  # Slightly transparent border
-
-                # Strategy 1: Exact contiguous match
-                for i in range(len(text_blocks) - n + 1):
-                    block_text = ' '.join(b["text"] for b in text_blocks[i:i+n])
-                    if block_text == ' '.join(val_words):
+                for i in range(len(text_blocks) - len(val_words) + 1):
+                    match = all(val_words[j] == text_blocks[i + j]["text"] for j in range(len(val_words)))
+                    if match:
                         x = text_blocks[i]["left"]
                         y = text_blocks[i]["top"]
-                        x_end = text_blocks[i+n-1]["left"] + text_blocks[i+n-1]["width"]
-                        y_end = text_blocks[i+n-1]["top"] + text_blocks[i+n-1]["height"]
-                        
-                        # Draw on overlay
+                        x_end = text_blocks[i + len(val_words) - 1]["left"] + text_blocks[i + len(val_words) - 1]["width"]
+                        y_end = text_blocks[i + len(val_words) - 1]["top"] + text_blocks[i + len(val_words) - 1]["height"]
                         overlay_draw.rectangle(
                             [(x, y), (x_end, y_end)],
-                            fill=highlight_color,
-                            outline=outline_color,
+                            fill=(255, 255, 102, 100),
+                            outline=(255, 204, 0, 200),
                             width=1
                         )
-                        matched = True
-                        print(f"✅ Exact match for {field_name}")
                         break
 
-                if matched:
-                    continue
-
-                # Strategy 2: Field-specific positional matching
-                if doc_type in ["pan", "moa"]:
-                    label_pos = None
-                    for i, block in enumerate(text_blocks):
-                        if field_name.lower() in block["text"]:
-                            label_pos = (block["left"], block["top"], block["width"], block["height"])
-                            break
-                    
-                    if label_pos:
-                        for block in text_blocks:
-                            if (block["left"] > label_pos[0] and 
-                                abs(block["top"] - label_pos[1]) < label_pos[3] * 1.5):
-                                overlay_draw.rectangle(
-                                    [(block["left"], block["top"]), 
-                                     (block["left"] + block["width"], block["top"] + block["height"])],
-                                    fill=highlight_color,
-                                    outline=(0, 102, 204, 200),  # Blue border
-                                    width=1
-                                )
-                                matched = True
-                                print(f"⚠️ Positional match for {field_name}")
-                                break
-
-                if matched:
-                    continue
-
-                # Strategy 3: Partial/fuzzy matching
-                best_match = None
-                best_score = 0
-                min_match_length = max(3, len(val_words) // 2)
-
-                for i in range(len(text_blocks) - min_match_length + 1):
-                    match_length = min(len(val_words), len(text_blocks) - i)
-                    matched_words = 0
-                    bounds = {
-                        "left": text_blocks[i]["left"],
-                        "top": text_blocks[i]["top"],
-                        "right": text_blocks[i]["left"] + text_blocks[i]["width"],
-                        "bottom": text_blocks[i]["top"] + text_blocks[i]["height"]
-                    }
-
-                    for j in range(match_length):
-                        if val_words[j] == text_blocks[i+j]["text"]:
-                            matched_words += 1
-                            bounds["left"] = min(bounds["left"], text_blocks[i+j]["left"])
-                            bounds["top"] = min(bounds["top"], text_blocks[i+j]["top"])
-                            bounds["right"] = max(bounds["right"], text_blocks[i+j]["left"] + text_blocks[i+j]["width"])
-                            bounds["bottom"] = max(bounds["bottom"], text_blocks[i+j]["top"] + text_blocks[i+j]["height"])
-
-                    current_score = matched_words / len(val_words)
-                    if current_score > best_score and current_score > 0.5:
-                        best_score = current_score
-                        best_match = bounds
-
-                if best_match:
-                    overlay_draw.rectangle(
-                        [(best_match["left"], best_match["top"]), 
-                         (best_match["right"], best_match["bottom"])],
-                        fill=highlight_color,
-                        outline=(255, 153, 51, 200),  # Orange border
-                        width=1
-                    )
-                    print(f"⚠️ Partial match ({int(best_score*100)}%) for {field_name}")
-                    continue
-
-                # Final fallback: Single word matches
-                for block in text_blocks:
-                    if any(word == block["text"] for word in val_words):
-                        overlay_draw.rectangle(
-                            [(block["left"], block["top"]), 
-                             (block["left"] + block["width"], block["top"] + block["height"])],
-                            fill=highlight_color,
-                            outline=(204, 51, 51, 200),  # Red border
-                            width=1
-                        )
-                        print(f"⚠️ Single word match for {field_name}")
-
-            # Combine original image with overlay
             image = Image.alpha_composite(image.convert('RGBA'), overlay).convert('RGB')
             highlighted_images.append(image)
 
-        # Save images back as a new PDF
-        output_pdf_path = os.path.join(HIGHLIGHTED_PDF_DIR, file_name)
+        # Save the new PDF
+        output_pdf_path = os.path.join(HIGHLIGHTED_PDF_DIR, filename)
         highlighted_images[0].save(
             output_pdf_path,
             save_all=True,
@@ -241,20 +101,58 @@ def highlight_fields():
         )
         print(f"✅ Highlighted PDF saved: {output_pdf_path}")
 
-    #Upload the highlighted docs to server
-    ##upload_highlighted_pdfs()
-    #Remove the highlighted docs from local storage
-    for filename in os.listdir(HIGHLIGHTED_PDF_DIR):
-        file_path = os.path.join(HIGHLIGHTED_PDF_DIR, filename)
-        if os.path.isfile(file_path):
-            os.remove(file_path)
-            print(filename, "is removed from local storage ✅")
-    
-    #Save extracted fields to DB
-    process_id = "1"
-    save_extracted_fields_to_db(process_id)
-    
+        # Upload the highlighted PDF
+        with open(output_pdf_path, "rb") as f:
+            files = {"file": (filename, f, "application/pdf")}
+            response = requests.post(UPLOAD_URL, files=files)
 
+            if response.status_code == 200:
+                print(f"✅ Uploaded: {filename}")
+                upload_response = response.json()
+                response_json.append({
+                    "processInstanceId": process_instance_id,
+                    "response": upload_response
+                })
+            else:
+                print(f"❌ Upload failed for {filename}: {response.status_code} - {response.text}")
+
+        os.remove(output_pdf_path)
+        print(f"🧹 Removed local file: {output_pdf_path}")
+
+    # Save the response body
+    with open(RESPONSE_BODY_PATH, "w") as f:
+        json.dump(response_json, f, indent=2)
+
+    # Save extractedFields and fileDetails to DB
+    hook = MySqlHook(mysql_conn_id="idp_mysql")
+    conn = hook.get_conn()
+    cursor = conn.cursor()
+
+    for upload in response_json:
+        pid = upload.get("processInstanceId")
+        file_info_list = upload.get("response", {}).get("files", [])
+        file_details = json.dumps(file_info_list[0]) if file_info_list else "{}"
+
+        # Find matching extracted fields list from new format
+        extracted_fields_list = []
+        for item in extracted_data:
+            if item.get("processInstanceId") == pid:
+                extracted_fields_list = item.get("extractedFields", [])
+                break
+        extracted_fields_json = json.dumps(extracted_fields_list)
+
+        cursor.execute("""
+            INSERT INTO ProcessInstanceDocuments 
+            (id, extractedFields, fileDetails, createdAt, updatedAt, isActive, isDeleted, isHumanUpdated)
+            VALUES (%s, %s, %s, NOW(), NOW(), 1, 0, 1)
+            ON DUPLICATE KEY UPDATE 
+                extractedFields = VALUES(extractedFields),
+                fileDetails = VALUES(fileDetails),
+                updatedAt = NOW()
+        """, (pid, extracted_fields_json, file_details))
+
+    conn.commit()
+    print("✅ Saved extractedFields and fileDetails to DB")
 
 # === DAG DEFINITION ===
 with DAG(
@@ -267,6 +165,5 @@ with DAG(
 
     highlight_task = PythonOperator(
         task_id="highlight_extracted_fields",
-        python_callable=highlight_fields
-        # provide_context=True
+        python_callable=highlight_and_upload,
     )

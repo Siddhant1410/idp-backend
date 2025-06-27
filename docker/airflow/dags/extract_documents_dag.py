@@ -11,165 +11,150 @@ from pdf2image import convert_from_path
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "extracted_fields.json")
+CLEANED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
 CLASSIFIED_JSON_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "classified_documents.json")
-
-
+BLUEPRINT_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
 
 openai.api_key = "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"
 
 def extract_text_from_pdf(pdf_path):
     try:
         images = convert_from_path(pdf_path)
-        text = ""
-        for img in images:
-            text += pytesseract.image_to_string(img)
-        return text
+        return " ".join(pytesseract.image_to_string(img) for img in images)
     except Exception as e:
-        print(f"OCR failed for {pdf_path}: {e}")
+        print(f"❌ OCR failed for {pdf_path}: {e}")
         return ""
+
+def correct_typos_with_genai(extracted_data):
+    try:
+        prompt = f"""
+        You are a helpful assistant. The following JSON contains field names and their extracted values from OCR-scanned documents.
+        Some values may contain spelling errors. Correct typos only in field values.
+        Do not make unneccesary corrections in Name unless it is of english Origin.
+        Do not change field names, structure or formatting. Return only corrected JSON.
+
+        JSON:
+        {json.dumps(extracted_data, indent=2)}
+        """
+        response = openai.ChatCompletion.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            timeout=60
+        )
+        content = response["choices"][0]["message"]["content"].strip()
+        if content.startswith("```json"):
+            content = content.replace("```json", "").replace("```", "").strip()
+        return json.loads(content)
+    except Exception as e:
+        print(f"❌ GenAI typo correction failed: {e}")
+        return extracted_data
 
 def extract_fields_from_documents(**context):
     process_id = context["dag_run"].conf.get("process_id")
     if not process_id:
         raise ValueError("Missing process_id in dag_run.conf")
 
-    # Step 1: DB connection
+    # MySQL connection
     hook = MySqlHook(mysql_conn_id="idp_mysql")
     conn = hook.get_conn()
     cursor = conn.cursor()
 
-    # Step 2: Fetch blueprint ID
-    cursor.execute("SELECT bluePrintId FROM Processes WHERE id = %s", (process_id,))
-    row = cursor.fetchone()
-    if not row:
-        raise ValueError("Process not found.")
-    blueprint_id = row[0]
+    # Load blueprint
+    if not os.path.exists(BLUEPRINT_PATH):
+        raise FileNotFoundError(f"❌ Missing blueprint.json at {BLUEPRINT_PATH}")
+    with open(BLUEPRINT_PATH, "r") as f:
+        blueprint = json.load(f)
 
-    # Step 3: Fetch blueprint JSON
-    cursor.execute("SELECT bluePrint FROM BluePrint WHERE id = %s", (blueprint_id,))
-    row = cursor.fetchone()
-    blueprint = json.loads(row[0])
-
-    # Step 4: Update currentStage in ProcessInstances
-    cursor.execute("""
-        UPDATE ProcessInstances
-        SET currentStage = %s,
-            isInstanceRunning = %s,
-            updatedAt = NOW()
-        WHERE processesId = %s
-    """, ("Extraction", 1, process_id))
-    conn.commit()
-    print(f"🟢 Updated ProcessInstances to stage 'Extraction' for process_id={process_id}")
-
-    # Step 5: Load classified document results
+    # Load classification results
     if not os.path.exists(CLASSIFIED_JSON_PATH):
-        raise FileNotFoundError("classified_documents.json not found. Please run classification DAG first.")
-
+        raise FileNotFoundError("❌ classified_documents.json not found.")
     with open(CLASSIFIED_JSON_PATH, "r") as f:
         classified_docs = json.load(f)
 
-    # Step 6: Extract extraction rules from blueprint
-    extract_node = next((n for n in blueprint if n["nodeName"] == "extract"), None)
+    # Update current stage
+    cursor.execute("""
+        UPDATE ProcessInstances
+        SET currentStage = %s, isInstanceRunning = %s, updatedAt = NOW()
+        WHERE processesId = %s
+    """, ("Extraction", 1, process_id))
+    conn.commit()
+
+    # Fetch processInstanceId
+    cursor.execute("SELECT id FROM ProcessInstances WHERE processesId = %s ORDER BY createdAt DESC LIMIT 1", (process_id,))
+    instance_row = cursor.fetchone()
+    if not instance_row:
+        raise ValueError("❌ ProcessInstance ID not found.")
+    process_instance_id = instance_row[0]
+
+    extract_node = next((n for n in blueprint if n["nodeName"].lower() == "extract"), None)
     if not extract_node:
-        raise ValueError("Extraction node not found in blueprint.")
+        raise ValueError("❌ No extract node found in blueprint.")
 
     rules = extract_node["component"]
-    extracted_results = {}
+    categories = {c["documentType"].lower(): c["id"] for c in rules["categories"]}
+    extractors = rules["extractors"]
+    extractor_fields = rules["extractorFields"]
+
+    structured_results = []
 
     for file_name, doc_type in classified_docs.items():
         doc_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
         if not os.path.exists(doc_path):
-            print(f"❌ File not found: {file_name}")
+            print(f"⚠️ File not found: {file_name}")
             continue
 
-        matching_rule = next((r for r in rules if r["documentCat"] == doc_type), None)
-        if not matching_rule:
-            print(f"❌ No extraction rule matched for document {file_name} of type {doc_type}")
+        doc_type_lower = doc_type.lower()
+        doc_type_id = categories.get(doc_type_lower)
+        if not doc_type_id or str(doc_type_id) not in extractor_fields:
+            print(f"⚠️ No extraction rules for {doc_type}")
             continue
 
-        fields = matching_rule.get("extractionFields", [])
-        extracted = {}
         ocr_text = extract_text_from_pdf(doc_path)
+        field_prompts = extractor_fields[str(doc_type_id)]
+        extracted = {}
 
-        for field in fields:
-            #prompt = f"{field['prompt']}\n\nDocument text:\n{ocr_text[:1500]}\n From the given document text, extract only the value from the field. Return the result as a plain string, without any explanation or formatting. Fix any general Typos if you feel there are any."
+        for field in field_prompts:
             prompt = f"""
-            The following is an OCR-scanned document text. It may contain minor spelling errors due to OCR.
-
-            Please:
-            1. Correct any obvious OCR typos internally (no need to return the corrected text), especially for address.
-            2. Then, extract only the value for the field: "{field['fieldName']}".
-            3. If any field value is not present, just return N/A instead of explanation.
-
-            Respond with only the extracted value as plain text. No labels or explanation.
+            The following is OCR-extracted text. Extract value for field: "{field['variableName']}".
+            Return only the value without any additional text or explanation. If not found, return "N/A".
 
             Text:
             {ocr_text[:1500]}
             """
             try:
-                print(f"🔍 Extracting '{field['fieldName']}' from {file_name}...")
+                print(f"🔍 Extracting {field['variableName']} from {file_name}")
                 response = openai.ChatCompletion.create(
                     model="gpt-4o",
                     messages=[{"role": "user", "content": prompt}],
                     temperature=0.2,
                     timeout=30
                 )
-                result = response["choices"][0]["message"]["content"].strip()
-                extracted[field["fieldName"]] = result
-                print(f"✅ {field['fieldName']} → {result}")
+                value = response["choices"][0]["message"]["content"].strip()
+                extracted[field["variableName"]] = value
             except Exception as e:
-                extracted[field["fieldName"]] = f"Error: {str(e)}"
-                print(f"❌ Error extracting {field['fieldName']}: {e}")
+                extracted[field["variableName"]] = f"Error: {e}"
 
-        extracted_results[file_name] = {
-            "documentType": doc_type,
-            "fields": extracted
-        }
+        # Compose final JSON structure
+        structured_results.append({
+            "documentDetails": {
+                "documentName": file_name,
+                "documentType": doc_type
+            },
+            "extractedFields": extracted,
+            "processInstanceId": process_instance_id
+        })
 
-    CLEANED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
-    def correct_typos_with_genai(extracted_data):
-        try:
-            prompt = f"""
-            You are a helpful assistant. The following JSON contains field names and their extracted values from OCR-scanned documents. Some values may contain spelling errors or artifacts.
-
-            Please review and return a corrected JSON with typos fixed only in the field values. 
-            Do not change the structure or field names. Return **only the corrected JSON** – no explanations or markdown.
-
-            JSON:
-            {json.dumps(extracted_data, indent=2)}
-            """
-
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                timeout=60
-            )
-            content = response["choices"][0]["message"]["content"].strip()
-
-            # Clean markdown markers if any
-            if content.startswith("```json"):
-                content = content.replace("```json", "").replace("```", "").strip()
-
-            return json.loads(content)
-
-        except Exception as e:
-            print(f"❌ GenAI typo correction failed: {e}")
-            return extracted_data  # fallback
-
-
-    # Step 7: Save to file
+    # Save raw extraction result
     with open(EXTRACTED_FIELDS_PATH, "w") as f:
-        json.dump(extracted_results, f, indent=2)
+        json.dump(structured_results, f, indent=2)
+    print(f"✅ Saved raw extracted_fields.json")
 
-    print(f"✅ Extraction complete. Results saved to {EXTRACTED_FIELDS_PATH}")
-
-    # Step 8: Correct typos using GenAI
-    cleaned_data = correct_typos_with_genai(extracted_results)
+    # Run GenAI-based typo correction
+    cleaned_data = correct_typos_with_genai(structured_results)
     with open(CLEANED_FIELDS_PATH, "w") as f:
         json.dump(cleaned_data, f, indent=2)
-    print(f"✅ Cleaned data saved to {CLEANED_FIELDS_PATH}")
-
+    print(f"✅ Saved cleaned_extracted_fields.json")
 
 
 # === DAG DEFINITION ===

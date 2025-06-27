@@ -12,10 +12,9 @@ import re
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
-VALIDATED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "validated_fields.json")
 
+# Set your OpenAI API Key
 openai.api_key = "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"
-
 
 def extract_text_from_pdf(pdf_path):
     try:
@@ -33,7 +32,7 @@ def validate_extracted_fields(**context):
     if not process_id:
         raise ValueError("Missing process_id in dag_run.conf")
 
-    # Update currentStage
+    # Step 1: Update currentStage in ProcessInstances
     hook = MySqlHook(mysql_conn_id="idp_mysql")
     conn = hook.get_conn()
     cursor = conn.cursor()
@@ -45,56 +44,61 @@ def validate_extracted_fields(**context):
         WHERE processesId = %s
     """, ("Validation", 1, process_id))
     conn.commit()
+    print(f"🟢 Updated ProcessInstances to 'Validation' stage for process_id={process_id}")
 
+    # Step 2: Load extracted fields
     if not os.path.exists(EXTRACTED_FIELDS_PATH):
-        raise FileNotFoundError("❌ extracted_fields.json not found.")
+        raise FileNotFoundError("❌ cleaned_extracted_fields.json not found")
 
     with open(EXTRACTED_FIELDS_PATH, "r") as f:
         extracted_data = json.load(f)
 
-    results = {}
-    for file_name, doc_info in extracted_data.items():
+    # Step 3: Validate each document
+    for doc in extracted_data:
+        document_meta = doc.get("documentDetails", {})
+        file_name = document_meta.get("documentName")
+        doc_type = document_meta.get("documentType")
+        fields = doc.get("extractedFields", {})
+        process_instance_id = doc.get("processInstanceId")
+
+        if not file_name or not doc_type or not process_instance_id:
+            print("❌ Missing critical data in entry, skipping...")
+            continue
+
         doc_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
         if not os.path.exists(doc_path):
             print(f"❌ File missing: {file_name}")
             continue
 
         ocr_text = extract_text_from_pdf(doc_path)
-        doc_type = doc_info["documentType"]
-        fields = doc_info["fields"]
-
-        field_scores = {}
         score_sum = 0
-        valid_score_count = 0
+        valid_fields = 0
+        validated_fields = []
 
         for field_name, extracted_value in fields.items():
             if extracted_value.strip().upper() == "N/A":
-                field_scores[field_name] = {
-                    "score": 0,
-                    "reason": "Value marked as N/A — skipping validation"
-                }
                 continue
 
             prompt = f"""
-You are validating extracted data from a scanned document.
+            You are validating extracted data from a scanned document.
 
-Document Type: {doc_type}
+            Document Type: {doc_type}
 
-OCR Text:
-{ocr_text[:1500]}
+            OCR Text:
+            {ocr_text[:1500]}
 
-Field Name: {field_name}
-Extracted Value: {extracted_value}
+            Field Name: {field_name}
+            Extracted Value: {extracted_value}
 
-Validation Rules:
-- Look for the extracted value in the OCR text.
-- Minor spelling errors or OCR typos should not reduce the score.
-- Only consider the format or presence of value.
-- Do NOT penalize spelling mistakes unless they alter the actual meaning.
+            Validation Rules:
+            - Look for the extracted value in the OCR text.
+            - Minor spelling errors or OCR typos should not reduce the score.
+            - Only consider the format or presence of value.
+            - Do NOT penalize spelling mistakes unless they alter the actual meaning.
 
-Return result in this format:
-Score: <number between 0-100>. Reason: <very short explanation>.
-"""
+            Return result in this format:
+            Score: <number between 0-100>.
+            """
 
             try:
                 response = openai.ChatCompletion.create(
@@ -103,38 +107,50 @@ Score: <number between 0-100>. Reason: <very short explanation>.
                     temperature=0.2
                 )
                 content = response["choices"][0]["message"]["content"].strip()
-
                 score_match = re.search(r"Score\s*:\s*(\d+)", content)
-                reason_match = re.search(r"Reason\s*:\s*(.+)", content)
-
-                if score_match and reason_match:
+                if score_match:
                     score = int(score_match.group(1))
-                    reason = reason_match.group(1).strip()
-                    field_scores[field_name] = {"score": score, "reason": reason}
-                    if score > 0:
-                        score_sum += score
-                        valid_score_count += 1
+                    validated_fields.append({
+                        "fieldName": field_name,
+                        "fieldValue": extracted_value,
+                        "fieldScore": score
+                    })
+                    score_sum += score
+                    valid_fields += 1
                 else:
-                    raise ValueError(f"Invalid format: {content}")
-
+                    print(f"⚠️ Score not found in response: {content}")
             except Exception as e:
                 print(f"❌ Validation failed for {field_name}: {e}")
-                field_scores[field_name] = {"score": 0, "reason": str(e)}
 
-        avg_score = round(score_sum / valid_score_count, 2) if valid_score_count else 0
-        results[file_name] = {
-            "documentType": doc_type,
-            "average_score": avg_score,
-            "fields": field_scores
-        }
+        # Replace raw dict with validated list
+        doc["extractedFields"] = validated_fields
+        overall_score = round(score_sum / valid_fields) if valid_fields else 0
 
-    with open(VALIDATED_FIELDS_PATH, "w") as f:
-        json.dump(results, f, indent=2)
+        # Step 4: Save documentDetails + overAllScore
+        document_details_json = json.dumps({
+            "documentName": file_name,
+            "documentType": doc_type
+        })
 
-    print(f"✅ Validation complete. Results saved to {VALIDATED_FIELDS_PATH}")
+        cursor.execute("""
+            INSERT INTO ProcessInstanceDocuments (id, documentDetails, overAllScore, updatedAt)
+            VALUES (%s, %s, %s, NOW())
+            ON DUPLICATE KEY UPDATE
+                documentDetails = VALUES(documentDetails),
+                overAllScore = VALUES(overAllScore),
+                updatedAt = NOW()
+        """, (process_instance_id, document_details_json, overall_score))
+        conn.commit()
+
+        print(f"✅ Stored metadata for {file_name} with avg score {overall_score}%")
+
+    # Step 5: Write updated fields with fieldScore back to file
+    with open(EXTRACTED_FIELDS_PATH, "w") as f:
+        json.dump(extracted_data, f, indent=2)
+    print(f"✅ Updated extracted_fields with fieldScore in {EXTRACTED_FIELDS_PATH}")
 
 
-# === DAG DEFINITION ===
+# === DAG Definition ===
 with DAG(
     dag_id="validate_documents_dag",
     start_date=datetime.now() - timedelta(days=1),
@@ -145,5 +161,5 @@ with DAG(
 
     validate_task = PythonOperator(
         task_id="validate_extracted_fields",
-        python_callable=validate_extracted_fields
+        python_callable=validate_extracted_fields,
     )

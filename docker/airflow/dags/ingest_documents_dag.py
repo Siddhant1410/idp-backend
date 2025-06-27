@@ -9,6 +9,7 @@ import os
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+BLUEPRINT_JSON_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
 
 def fetch_blueprint_and_download_docs(**context):
     process_id = context["dag_run"].conf.get("process_id")
@@ -33,9 +34,15 @@ def fetch_blueprint_and_download_docs(**context):
     if not row or not row[0]:
         raise ValueError(f"No blueprint found for blueprint ID {blueprint_id}")
     
-    blueprint_json = json.loads(row[0])  # parse TEXT field into JSON
+    blueprint_json = json.loads(row[0])
 
-    # Step 3: Update ProcessInstances table with currentStage = 'Ingestion'
+    # Save blueprint locally for other DAGs
+    os.makedirs(LOCAL_DOWNLOAD_DIR, exist_ok=True)
+    with open(BLUEPRINT_JSON_PATH, "w") as f:
+        json.dump(blueprint_json, f, indent=2)
+    print(f"✅ Blueprint saved to {BLUEPRINT_JSON_PATH}")
+
+    # Step 3: Update ProcessInstances table
     cursor.execute("""
     UPDATE ProcessInstances
     SET currentStage = %s,
@@ -47,32 +54,35 @@ def fetch_blueprint_and_download_docs(**context):
     print(f"✅ ProcessInstances updated: currentStage='Ingestion', isInstanceRunning=1 for process_id = {process_id}")
 
     # Step 4: Find ingestion node
-    ingestion_node = next((node for node in blueprint_json if node.get("nodeName") == "ingestion"), None)
+    ingestion_node = next((node for node in blueprint_json if node.get("nodeName", "").lower() == "ingestion"), None)
     if not ingestion_node:
         raise ValueError("No ingestion node found in blueprint")
 
-    ingestion_path = ingestion_node["component"].get("path")
-    if not ingestion_path:
-        raise ValueError("Ingestion path missing in blueprint")
+    ingestion_url = ingestion_node["component"].get("url")
+    old_ingestion_url = ingestion_url
+    ingestion_url = ingestion_url + "process-instance-4"
+    if not ingestion_url:
+        raise ValueError("Ingestion URL is missing in blueprint")
 
     # Step 5: Fetch document list
-    print(f"Fetching document list from: {ingestion_path}")
-    response = requests.get(ingestion_path, timeout=30)
+    print(f"Fetching document list from: {ingestion_url}")
+    response = requests.get(ingestion_url, timeout=30)
     response.raise_for_status()
 
-    documents = response.json()  # Can be list of strings (filenames)
-    os.makedirs(LOCAL_DOWNLOAD_DIR, exist_ok=True)
+    documents = response.json()
     print("Documents from ingestion path:", documents)
 
-    # Normalize base URL (remove trailing slash)
-    base_url = ingestion_path.rstrip("/")
+    # Normalize base URL
+    base_url = ingestion_url.rstrip("/")
 
+
+    valid_extensions = [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg"]
     for file_name in documents:
-        if not isinstance(file_name, str):
-            print("Skipping unexpected item:", file_name)
+        if not isinstance(file_name, str) or not any(file_name.lower().endswith(ext) for ext in valid_extensions):
+            print(f"⚠️ Skipping invalid item (likely a folder or unsupported type): {file_name}")
             continue
 
-        file_url = f"{base_url}/{file_name}"
+        file_url = f"{old_ingestion_url}/file/process-instance-4/{file_name}"
         file_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
 
         print(f"Downloading {file_url} → {file_path}")
@@ -88,7 +98,7 @@ def fetch_blueprint_and_download_docs(**context):
 with DAG(
     dag_id="ingest_documents_dag",
     start_date=datetime.now() - timedelta(days=1),
-    schedule=None,  
+    schedule=None,
     catchup=False,
     tags=["idp", "ingestion"],
 ) as dag:

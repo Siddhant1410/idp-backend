@@ -19,8 +19,13 @@ def extract_text_from_pdf(pdf_path):
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+blueprint_path = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # from .env
 openai.api_key = "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"
+
+if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api_key.startswith("sk-proj-"):
+    raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
+
 
 def classify_documents(**context):
     process_id = context["dag_run"].conf.get("process_id")
@@ -39,9 +44,11 @@ def classify_documents(**context):
     blueprint_id = row[0]
 
     # Step 2: Fetch blueprint JSON
-    cursor.execute("SELECT bluePrint FROM BluePrint WHERE id = %s", (blueprint_id,))
-    row = cursor.fetchone()
-    blueprint = json.loads(row[0])
+    if not os.path.exists(blueprint_path):
+        raise FileNotFoundError(f"❌ blueprint.json not found at {blueprint_path}. Please run ingestion DAG first.")
+
+    with open(blueprint_path, "r") as f:
+        blueprint = json.load(f)
 
     # Step 3: Update ProcessInstances table to reflect current stage
     cursor.execute(
@@ -58,15 +65,17 @@ def classify_documents(**context):
     print(f"🟢 ProcessInstances updated → currentStage='Classification', isInstanceRunning=1 for process_id={process_id}")
 
     # Step 4: Extract classify node
-    classify_node = next((n for n in blueprint if n["nodeName"] == "classify"), None)
+    classify_node = next((n for n in blueprint if n["nodeName"].lower() == "classify"), None)
     if not classify_node:
         raise ValueError("Classification node not found in blueprint")
 
-    target_labels = classify_node["component"].get("targetClassification", [])
-    if not target_labels:
-        raise ValueError("targetClassification not defined")
+    categories = classify_node["component"].get("categories", [])
+    if not categories:
+        raise ValueError("No categories found in Classify component")
 
+    target_labels = [c["documentType"] for c in categories]
     label_str = ", ".join(target_labels)
+
     results = {}
 
     # Step 5: Insert or activate document types in DocumentType table
@@ -102,7 +111,7 @@ def classify_documents(**context):
             print(f"🧾 Extracting text from: {file_name}")
             extracted_text = extract_text_from_pdf(file_path)
 
-            prompt = f"Given this document content, classify it into one of: {label_str}.\n\nContent:\n{extracted_text}. Return only the type."
+            prompt = f"Given this document content, classify it into one of: {label_str}.\n\nContent:\n{extracted_text}. Return only the type, without any analysis or justification."
 
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
@@ -112,6 +121,10 @@ def classify_documents(**context):
             )
             classification = response["choices"][0]["message"]["content"].strip()
             results[file_name] = classification
+            
+            if classification not in target_labels:
+                print(f"⚠️ Warning: {file_name} → unexpected classification: {classification}")
+
             print(f"✅ {file_name} → {classification}")
         except Exception as e:
             results[file_name] = f"Error: {e}"

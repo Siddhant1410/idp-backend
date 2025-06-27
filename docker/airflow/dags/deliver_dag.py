@@ -8,6 +8,8 @@ import json
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+BLUEPRINT_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
+RESPONSE_BODY_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "response_body.json")
 
 def deliver_documents(**context):
     process_id = context["dag_run"].conf.get("process_id")
@@ -19,19 +21,12 @@ def deliver_documents(**context):
     conn = hook.get_conn()
     cursor = conn.cursor()
 
-    # Fetch blueprint ID
-    cursor.execute("SELECT bluePrintId FROM Processes WHERE id = %s", (process_id,))
-    row = cursor.fetchone()
-    if not row or not row[0]:
-        raise ValueError("bluePrintId not found")
-    blueprint_id = row[0]
+    # Load blueprint locally
+    if not os.path.exists(BLUEPRINT_PATH):
+        raise FileNotFoundError("❌ blueprint.json not found locally")
 
-    # Fetch blueprint JSON
-    cursor.execute("SELECT bluePrint FROM BluePrint WHERE id = %s", (blueprint_id,))
-    row = cursor.fetchone()
-    if not row or not row[0]:
-        raise ValueError("Blueprint data missing")
-    blueprint_json = json.loads(row[0])
+    with open(BLUEPRINT_PATH, "r") as f:
+        blueprint_json = json.load(f)
 
     # Find Deliver node
     deliver_node = next((n for n in blueprint_json if n["nodeName"].lower() == "deliver"), None)
@@ -42,7 +37,7 @@ def deliver_documents(**context):
     if not ftp_path:
         raise ValueError("FTP path missing in deliver node")
 
-    # Update stage to 'Delivery' in ProcessInstances (optional but recommended)
+    # Update current stage to 'Delivery'
     cursor.execute("""
         UPDATE ProcessInstances
         SET currentStage = %s,
@@ -58,7 +53,7 @@ def deliver_documents(**context):
     ftp_conn.cwd(ftp_path)
     print(f"✅ Connected to FTP at {ftp_path}")
 
-    # Upload files
+    # Upload all local PDFs
     uploaded_count = 0
     for filename in os.listdir(LOCAL_DOWNLOAD_DIR):
         if filename.endswith(".pdf"):
@@ -69,6 +64,41 @@ def deliver_documents(**context):
                 uploaded_count += 1
 
     print(f"✅ Uploaded {uploaded_count} files to FTP path: {ftp_path}")
+
+    # Read processInstanceId from response_body.json and update DB
+    if not os.path.exists(RESPONSE_BODY_PATH):
+        raise FileNotFoundError("❌ response_body.json not found")
+
+    with open(RESPONSE_BODY_PATH, "r") as f:
+        response_data = json.load(f)
+
+    updated_count = 0
+    for entry in response_data:
+        process_instance_id = entry.get("processInstanceId")
+        if process_instance_id:
+            cursor.execute("""
+                UPDATE ProcessInstanceDocuments
+                SET isActive = 1,
+                    isDeleted = 0,
+                    isHumanUpdated = 1,
+                    updatedAt = NOW()
+                WHERE id = %s
+            """, (process_instance_id,))
+            updated_count += 1
+
+    conn.commit()
+    print(f"✅ Updated {updated_count} ProcessInstanceDocuments records")
+
+    #Mark the Current Process Instance status as completed
+    cursor.execute("""
+        UPDATE ProcessInstances
+        SET currentStage = %s,
+            isInstanceRunning = 0,
+            updatedAt = NOW()
+        WHERE processesId = %s
+    """, ("Completed", process_id))
+    conn.commit()
+    print(f"✅ Updated Process Instance Status as Completed.")
 
 # === DAG Definition ===
 with DAG(
