@@ -287,8 +287,8 @@ def highlight_and_upload(**context):
 
         cursor.execute("""
             INSERT INTO ProcessInstanceDocuments 
-            (processInstancesId, documentDetails, extractedFields, fileDetails, overAllScore, createdAt, updatedAt, isActive, isDeleted, isHumanUpdated)
-            VALUES (%s, %s, %s, %s, %s, NOW(), NOW(), 1, 0, 1)
+            (processInstancesId, documentDetails, extractedFields, fileDetails, overAllScore, createdAt, updatedAt, isActive, isDeleted)
+            VALUES (%s, %s, %s, %s, %s, NOW(), NOW(), 1, 0)
             ON DUPLICATE KEY UPDATE 
                 documentDetails = VALUES(documentDetails),
                 extractedFields = VALUES(extractedFields),
