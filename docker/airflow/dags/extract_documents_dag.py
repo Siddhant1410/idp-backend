@@ -51,9 +51,10 @@ def correct_typos_with_genai(extracted_data):
         return extracted_data
 
 def extract_fields_from_documents(**context):
-    process_id = context["dag_run"].conf.get("process_id")
-    if not process_id:
-        raise ValueError("Missing process_id in dag_run.conf")
+    # Get process instance ID from DAG run configuration
+    process_instance_id = context["dag_run"].conf.get("id")
+    if not process_instance_id:
+        raise ValueError("Missing process_instance_id in dag_run.conf")
 
     # MySQL connection
     hook = MySqlHook(mysql_conn_id="idp_mysql")
@@ -76,16 +77,10 @@ def extract_fields_from_documents(**context):
     cursor.execute("""
         UPDATE ProcessInstances
         SET currentStage = %s, isInstanceRunning = %s, updatedAt = NOW()
-        WHERE processesId = %s
-    """, ("Extraction", 1, process_id))
+        WHERE id = %s
+    """, ("Extraction", 1, process_instance_id))
     conn.commit()
 
-    # Fetch processInstanceId
-    cursor.execute("SELECT id FROM ProcessInstances WHERE processesId = %s ORDER BY createdAt DESC LIMIT 1", (process_id,))
-    instance_row = cursor.fetchone()
-    if not instance_row:
-        raise ValueError("❌ ProcessInstance ID not found.")
-    process_instance_id = instance_row[0]
 
     extract_node = next((n for n in blueprint if n["nodeName"].lower() == "extract"), None)
     if not extract_node:

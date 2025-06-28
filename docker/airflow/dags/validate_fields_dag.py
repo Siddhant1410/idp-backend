@@ -28,9 +28,10 @@ def extract_text_from_pdf(pdf_path):
         return ""
 
 def validate_extracted_fields(**context):
-    process_id = context["dag_run"].conf.get("process_id")
-    if not process_id:
-        raise ValueError("Missing process_id in dag_run.conf")
+    # Get process instance ID from DAG run configuration
+    process_instance_id = context["dag_run"].conf.get("id")
+    if not process_instance_id:
+        raise ValueError("Missing process_instance_id in dag_run.conf")
 
     # Step 1: Update currentStage in ProcessInstances
     hook = MySqlHook(mysql_conn_id="idp_mysql")
@@ -41,10 +42,10 @@ def validate_extracted_fields(**context):
         SET currentStage = %s,
             isInstanceRunning = %s,
             updatedAt = NOW()
-        WHERE processesId = %s
-    """, ("Validation", 1, process_id))
+        WHERE id = %s
+    """, ("Validation", 1, process_instance_id))
     conn.commit()
-    print(f"🟢 Updated ProcessInstances to 'Validation' stage for process_id={process_id}")
+    print(f"🟢 Updated ProcessInstances to 'Validation' stage for process_instance_id={process_instance_id}")
 
     # Step 2: Load extracted fields
     if not os.path.exists(EXTRACTED_FIELDS_PATH):

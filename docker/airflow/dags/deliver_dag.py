@@ -12,9 +12,10 @@ BLUEPRINT_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
 RESPONSE_BODY_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "response_body.json")
 
 def deliver_documents(**context):
-    process_id = context["dag_run"].conf.get("process_id")
-    if not process_id:
-        raise ValueError("Missing process_id in dag_run.conf")
+    # Get process instance ID from DAG run configuration
+    process_instance_id = context["dag_run"].conf.get("id")
+    if not process_instance_id:
+        raise ValueError("Missing process_instance_id in dag_run.conf")
 
     # DB connection
     hook = MySqlHook(mysql_conn_id="idp_mysql")
@@ -43,8 +44,8 @@ def deliver_documents(**context):
         SET currentStage = %s,
             isInstanceRunning = 1,
             updatedAt = NOW()
-        WHERE processesId = %s
-    """, ("Delivery", process_id))
+        WHERE id = %s
+    """, ("Delivery", process_instance_id))
     conn.commit()
 
     # Connect to FTP
@@ -95,8 +96,8 @@ def deliver_documents(**context):
         SET currentStage = %s,
             isInstanceRunning = 0,
             updatedAt = NOW()
-        WHERE processesId = %s
-    """, ("Completed", process_id))
+        WHERE id = %s
+    """, ("Completed", process_instance_id))
     conn.commit()
     print(f"✅ Updated Process Instance Status as Completed.")
 

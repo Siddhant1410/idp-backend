@@ -20,9 +20,10 @@ UPLOAD_URL = "http://69.62.81.68:3057/files"
 os.makedirs(HIGHLIGHTED_PDF_DIR, exist_ok=True)
 
 def highlight_and_upload(**context):
-    process_id = context["dag_run"].conf.get("process_id")
-    if not process_id:
-        raise ValueError("Missing process_id in dag_run.conf")
+    # Get process instance ID from DAG run configuration
+    process_instance_id = context["dag_run"].conf.get("id")
+    if not process_instance_id:
+        raise ValueError("Missing process_instance_id in dag_run.conf")
 
     # Load extracted fields
     with open(CLEANED_FIELDS_PATH, "r") as f:
@@ -40,7 +41,7 @@ def highlight_and_upload(**context):
         # Try to get matching extracted fields
         matched = next((item for item in extracted_data if item.get("documentDetails", {}).get("documentName") == filename), None)
         extracted_fields = matched.get("extractedFields", []) if matched else []
-        process_instance_id = matched.get("processInstanceId") if matched else process_id
+        process_instance_id_ = matched.get("processInstanceId") if matched else process_instance_id
 
         # Highlight logic
         images = convert_from_path(pdf_path)
@@ -110,7 +111,7 @@ def highlight_and_upload(**context):
                 print(f"✅ Uploaded: {filename}")
                 upload_response = response.json()
                 response_json.append({
-                    "processInstanceId": process_instance_id,
+                    "processInstanceId": process_instance_id_,
                     "response": upload_response
                 })
             else:

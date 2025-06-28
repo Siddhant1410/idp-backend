@@ -28,20 +28,13 @@ if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api
 
 
 def classify_documents(**context):
-    process_id = context["dag_run"].conf.get("process_id")
-    if not process_id:
-        raise ValueError("Missing process_id in dag_run.conf")
+    process_instance_id = context["dag_run"].conf.get("id")
+    if not process_instance_id:
+        raise ValueError("Missing process_instance_id in dag_run.conf")
 
     hook = MySqlHook(mysql_conn_id="idp_mysql")
     conn = hook.get_conn()
     cursor = conn.cursor()
-
-    # Step 1: Fetch bluePrintId
-    cursor.execute("SELECT bluePrintId FROM Processes WHERE id = %s", (process_id,))
-    row = cursor.fetchone()
-    if not row:
-        raise ValueError("Process not found")
-    blueprint_id = row[0]
 
     # Step 2: Fetch blueprint JSON
     if not os.path.exists(blueprint_path):
@@ -57,12 +50,12 @@ def classify_documents(**context):
         SET currentStage = %s,
             isInstanceRunning = %s,
             updatedAt = NOW()
-        WHERE processesId = %s
+        WHERE id = %s
         """,
-        ("Classification", 1, process_id)
+        ("Classification", 1, process_instance_id)
     )
     conn.commit()
-    print(f"🟢 ProcessInstances updated → currentStage='Classification', isInstanceRunning=1 for process_id={process_id}")
+    print(f"🟢 ProcessInstances updated → currentStage='Classification', isInstanceRunning=1 for process_instance_id={process_instance_id}")
 
     # Step 4: Extract classify node
     classify_node = next((n for n in blueprint if n["nodeName"].lower() == "classify"), None)
