@@ -129,7 +129,7 @@ with DAG(
     dag_id='watchdog_node',
     default_args=default_args,
     start_date=datetime.now() - timedelta(minutes=5),
-    schedule='*/10 * * * *',  # Every 5 minutes
+    schedule='*/5 * * * *',  # Every 5 minutes
     catchup=False,
     tags=['idp', 'watchdog'],
 ) as dag:

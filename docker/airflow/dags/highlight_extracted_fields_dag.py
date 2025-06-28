@@ -10,6 +10,15 @@ import re
 import requests
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 
+# === DAG Trigger CONFIG === #
+AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
+AIRFLOW_USERNAME = "airflow"
+AIRFLOW_PASSWORD = "airflow"
+LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
+
+if LOCAL_MODE:
+    AIRFLOW_API_URL = "http://localhost:8080/api/v2"
+
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 CLEANED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
@@ -18,6 +27,18 @@ RESPONSE_BODY_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "response_body.json")
 UPLOAD_URL = "http://69.62.81.68:3057/files"
 
 os.makedirs(HIGHLIGHTED_PDF_DIR, exist_ok=True)
+
+def get_auth_token():
+    """Get JWT token from Airflow API"""
+    auth_url = f"{AIRFLOW_API_URL.replace('/api/v2', '')}/auth/token"
+    response = requests.post(
+        auth_url,
+        json={"username": AIRFLOW_USERNAME, "password": AIRFLOW_PASSWORD},
+        headers={"Content-Type": "application/json"},
+        timeout=10
+    )
+    response.raise_for_status()
+    return response.json()["access_token"]
 
 def highlight_and_upload(**context):
     # Get process instance ID from DAG run configuration
@@ -154,6 +175,25 @@ def highlight_and_upload(**context):
 
     conn.commit()
     print("✅ Saved extractedFields and fileDetails to DB")
+
+    # Trigger deliver_dag
+    print("🚀 Triggering deliver_dag...")
+    token = get_auth_token()
+    trigger_url = f"{AIRFLOW_API_URL}/dags/deliver_dag/dagRuns"
+    run_id = f"triggered_by_validate_human_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "dag_run_id": run_id,
+        "logical_date": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        "conf": {"id": process_instance_id}
+    }
+
+    response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
+    response.raise_for_status()
+    print(f"✅ Successfully triggered deliver_dag with ID {process_instance_id}")
 
 # === DAG DEFINITION ===
 with DAG(

@@ -8,6 +8,29 @@ import openai
 import pytesseract
 from pdf2image import convert_from_path
 import tempfile
+import requests
+
+# === DAG Trigger CONFIG === #
+AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
+AIRFLOW_USERNAME = "airflow"
+AIRFLOW_PASSWORD = "airflow"
+LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
+
+if LOCAL_MODE:
+    AIRFLOW_API_URL = "http://localhost:8080/api/v2"
+
+
+def get_auth_token():
+    """Get JWT token from Airflow API"""
+    auth_url = f"{AIRFLOW_API_URL.replace('/api/v2', '')}/auth/token"
+    response = requests.post(
+        auth_url,
+        json={"username": AIRFLOW_USERNAME, "password": AIRFLOW_PASSWORD},
+        headers={"Content-Type": "application/json"},
+        timeout=10
+    )
+    response.raise_for_status()
+    return response.json()["access_token"]
 
 # === OCR Extraction Function === #
 def extract_text_from_pdf(pdf_path):
@@ -138,6 +161,25 @@ def classify_documents(**context):
         """, (doc_type,))
     conn.commit()
     print("🔕 DocumentType table updated → isActive=0 after classification.")
+
+    # 8. Trigger extract_documents_dag
+    print("🚀 Triggering extract_documents_dag...")
+    token = get_auth_token()
+    trigger_url = f"{AIRFLOW_API_URL}/dags/extract_documents_dag/dagRuns"
+    run_id = f"triggered_by_classify_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "dag_run_id": run_id,
+        "logical_date": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+        "conf": {"id": process_instance_id}
+    }
+
+    response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
+    response.raise_for_status()
+    print(f"✅ Successfully triggered extract_documents_dag with ID {process_instance_id}")
 
 
 # === DAG Definition ===
