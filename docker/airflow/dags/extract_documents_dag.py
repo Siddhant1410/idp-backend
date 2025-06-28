@@ -20,10 +20,6 @@ if LOCAL_MODE:
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "extracted_fields.json")
-CLEANED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
-CLASSIFIED_JSON_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "classified_documents.json")
-BLUEPRINT_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
 
 openai.api_key = "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"
 
@@ -77,6 +73,13 @@ def extract_fields_from_documents(**context):
     process_instance_id = context["dag_run"].conf.get("id")
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
+    
+    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + str(process_instance_id))
+    os.makedirs(process_instance_dir_path, exist_ok=True)
+    EXTRACTED_FIELDS_PATH = os.path.join(process_instance_dir_path, "extracted_fields.json")
+    CLEANED_FIELDS_PATH = os.path.join(process_instance_dir_path, "cleaned_extracted_fields.json")
+    CLASSIFIED_JSON_PATH = os.path.join(process_instance_dir_path, "classified_documents.json")
+    BLUEPRINT_PATH = os.path.join(process_instance_dir_path, "blueprint.json")
 
     # MySQL connection
     hook = MySqlHook(mysql_conn_id="idp_mysql")
@@ -116,7 +119,7 @@ def extract_fields_from_documents(**context):
     structured_results = []
 
     for file_name, doc_type in classified_docs.items():
-        doc_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
+        doc_path = os.path.join(process_instance_dir_path, file_name)
         if not os.path.exists(doc_path):
             print(f"⚠️ File not found: {file_name}")
             continue
@@ -176,7 +179,7 @@ def extract_fields_from_documents(**context):
     # Trigger validate_documents_dag
     print("🚀 Triggering validate_fields_dag...")
     token = get_auth_token()
-    trigger_url = f"{AIRFLOW_API_URL}/dags/validate_documents_dag/dagRuns"
+    trigger_url = f"{AIRFLOW_API_URL}/dags/highlight_extracted_fields_dag/dagRuns"
     run_id = f"triggered_by_extraction_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
     headers = {
         "Authorization": f"Bearer {token}",

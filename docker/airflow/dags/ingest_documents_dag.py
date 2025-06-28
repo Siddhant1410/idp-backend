@@ -38,7 +38,7 @@ def fetch_blueprint_and_download_docs(**context):
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
 
-    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + process_instance_id)
+    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + str(process_instance_id))
     os.makedirs(process_instance_dir_path, exist_ok=True)
     BLUEPRINT_JSON_PATH = os.path.join(process_instance_dir_path, "blueprint.json")
     

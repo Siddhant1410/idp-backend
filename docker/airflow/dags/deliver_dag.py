@@ -6,17 +6,21 @@ from datetime import datetime, timedelta
 import os
 import json
 import requests
+import shutil
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-BLUEPRINT_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
-RESPONSE_BODY_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "response_body.json")
 
 def deliver_documents(**context):
     # Get process instance ID from DAG run configuration
     process_instance_id = context["dag_run"].conf.get("id")
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
+    
+    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + str(process_instance_id))
+    os.makedirs(process_instance_dir_path, exist_ok=True)
+    BLUEPRINT_PATH = os.path.join(process_instance_dir_path, "blueprint.json")
+    RESPONSE_BODY_PATH = os.path.join(process_instance_dir_path, "response_body.json")
 
     # DB connection
     hook = MySqlHook(mysql_conn_id="idp_mysql")
@@ -57,9 +61,9 @@ def deliver_documents(**context):
 
     # Upload all local PDFs
     uploaded_count = 0
-    for filename in os.listdir(LOCAL_DOWNLOAD_DIR):
+    for filename in os.listdir(process_instance_dir_path):
         if filename.endswith(".pdf"):
-            local_file_path = os.path.join(LOCAL_DOWNLOAD_DIR, filename)
+            local_file_path = os.path.join(process_instance_dir_path, filename)
             with open(local_file_path, "rb") as f:
                 ftp_conn.storbinary(f"STOR {filename}", f)
                 print(f"📤 Uploaded: {filename}")
@@ -101,6 +105,8 @@ def deliver_documents(**context):
     """, ("Completed", process_instance_id))
     conn.commit()
     print(f"✅ Updated Process Instance Status as Completed.")
+    shutil.rmtree(process_instance_dir_path)
+    print(f"✅ Deleted Process Instance Folder.")
 
 # === DAG Definition ===
 with DAG(

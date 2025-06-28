@@ -19,6 +19,13 @@ LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
 if LOCAL_MODE:
     AIRFLOW_API_URL = "http://localhost:8080/api/v2"
 
+# === CONFIG ===
+LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # from .env
+openai.api_key = "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"
+
+if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api_key.startswith("sk-proj-"):
+    raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
 
 def get_auth_token():
     """Get JWT token from Airflow API"""
@@ -40,20 +47,14 @@ def extract_text_from_pdf(pdf_path):
         text += pytesseract.image_to_string(img)
     return text
 
-# === CONFIG ===
-LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-blueprint_path = os.path.join(LOCAL_DOWNLOAD_DIR, "blueprint.json")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # from .env
-openai.api_key = "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"
-
-if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api_key.startswith("sk-proj-"):
-    raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
-
-
 def classify_documents(**context):
     process_instance_id = context["dag_run"].conf.get("id")
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
+    
+    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + str(process_instance_id))
+    os.makedirs(process_instance_dir_path, exist_ok=True)
+    blueprint_path = os.path.join(process_instance_dir_path, "blueprint.json")
 
     hook = MySqlHook(mysql_conn_id="idp_mysql")
     conn = hook.get_conn()
@@ -118,11 +119,11 @@ def classify_documents(**context):
 
 
     # Step 6: Classify each file using OCR + GenAI
-    for file_name in os.listdir(LOCAL_DOWNLOAD_DIR):
+    for file_name in os.listdir(process_instance_dir_path):
         if not file_name.endswith(".pdf"):
             continue
 
-        file_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
+        file_path = os.path.join(process_instance_dir_path, file_name)
         try:
             print(f"🧾 Extracting text from: {file_name}")
             extracted_text = extract_text_from_pdf(file_path)
@@ -147,7 +148,7 @@ def classify_documents(**context):
             print(f"❌ {file_name} → {e}")
 
     # Save classification results to JSON for next DAG
-    with open(os.path.join(LOCAL_DOWNLOAD_DIR, "classified_documents.json"), "w") as f:
+    with open(os.path.join(process_instance_dir_path, "classified_documents.json"), "w") as f:
         json.dump(results, f)
         print("📝 Classification results saved to classified_documents.json")
 

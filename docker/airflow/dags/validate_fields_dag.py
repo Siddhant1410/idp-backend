@@ -3,6 +3,7 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from datetime import datetime, timedelta
 from pdf2image import convert_from_path
+
 import pytesseract
 import openai
 import os
@@ -21,7 +22,6 @@ if LOCAL_MODE:
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-EXTRACTED_FIELDS_PATH = os.path.join(LOCAL_DOWNLOAD_DIR, "cleaned_extracted_fields.json")
 
 # Set your OpenAI API Key
 openai.api_key = "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"
@@ -54,6 +54,10 @@ def validate_extracted_fields(**context):
     process_instance_id = context["dag_run"].conf.get("id")
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
+    
+    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + str(process_instance_id))
+    os.makedirs(process_instance_dir_path, exist_ok=True)
+    EXTRACTED_FIELDS_PATH = os.path.join(process_instance_dir_path, "cleaned_extracted_fields.json")
 
     # Step 1: Update currentStage in ProcessInstances
     hook = MySqlHook(mysql_conn_id="idp_mysql")
@@ -88,7 +92,7 @@ def validate_extracted_fields(**context):
             print("❌ Missing critical data in entry, skipping...")
             continue
 
-        doc_path = os.path.join(LOCAL_DOWNLOAD_DIR, file_name)
+        doc_path = os.path.join(process_instance_dir_path, file_name)
         if not os.path.exists(doc_path):
             print(f"❌ File missing: {file_name}")
             continue
@@ -156,7 +160,7 @@ def validate_extracted_fields(**context):
         })
 
         cursor.execute("""
-            INSERT INTO ProcessInstanceDocuments (id, documentDetails, overAllScore, updatedAt)
+            INSERT INTO ProcessInstanceDocuments (processInstancesId, documentDetails, overAllScore, updatedAt)
             VALUES (%s, %s, %s, NOW())
             ON DUPLICATE KEY UPDATE
                 documentDetails = VALUES(documentDetails),
