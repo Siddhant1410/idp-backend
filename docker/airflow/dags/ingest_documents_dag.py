@@ -5,6 +5,15 @@ from airflow.providers.mysql.hooks.mysql import MySqlHook
 import json
 import requests
 import os
+from ftplib import FTP
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding as sym_padding
+from cryptography.hazmat.backends import default_backend
+import base64
+
+SECRET_KEY = b'A7x!m3ZqP9t#F6vLb2r@X4hKd8WcY1eB'  # Must be exactly 32 bytes
+
+AUTO_EXECUTE_NEXT_NODE = 1
 
 # === DAG Trigger CONFIG === #
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
@@ -18,6 +27,27 @@ if LOCAL_MODE:
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 
+def fix_base64_padding(s: str) -> str:
+    return s + '=' * (-len(s) % 4)
+
+def decrypt_password(encrypted_base64: str, secret_key: bytes) -> str:
+    try:
+        encrypted_base64 = fix_base64_padding(encrypted_base64)
+        raw = base64.b64decode(encrypted_base64)
+        iv = raw[:16]
+        ciphertext = raw[16:]
+
+        cipher = Cipher(algorithms.AES(secret_key), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+
+        unpadder = sym_padding.PKCS7(128).unpadder()
+        plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
+
+        return plaintext.decode('utf-8')
+    except Exception as e:
+        print("❌ Failed to decrypt FTP password:", e)
+        raise
 
 def get_auth_token():
     """Get JWT token from Airflow API"""
@@ -38,7 +68,9 @@ def fetch_blueprint_and_download_docs(**context):
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
 
-    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + str(process_instance_id))
+    valid_extensions = ['.pdf']
+
+    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, f"process-instance-{process_instance_id}")
     os.makedirs(process_instance_dir_path, exist_ok=True)
     BLUEPRINT_JSON_PATH = os.path.join(process_instance_dir_path, "blueprint.json")
     
@@ -121,60 +153,113 @@ def fetch_blueprint_and_download_docs(**context):
         if not ingestion_url:
             raise ValueError("Ingestion URL is missing in blueprint")
 
-        # 6. Fetch document list from ingestion source
-        print(f"🔍 Fetching document list from: {ingestion_url}")
-        response = requests.get(ingestion_url, timeout=30)
-        response.raise_for_status()
-        documents = response.json()
-        print(f"📄 Found {len(documents)} documents at source")
+        # 6. Handle ingestion based on channelType
+        channel_type = ingestion_config.get("channelType").lower()
+        print(f"Ingestion Channel Type: {channel_type}")
+        documents = []
 
-        # 7. Download valid documents
-        valid_extensions = [".pdf", ".doc", ".docx", ".png", ".jpg", ".jpeg"]
-        downloaded_count = 0
-        
-        for file_name in documents:
-            if not isinstance(file_name, str):
-                continue
-                
-            file_name_lower = file_name.lower()
-            if not any(file_name_lower.endswith(ext) for ext in valid_extensions):
-                print(f"⚠️ Skipping unsupported file: {file_name}")
-                continue
+        if channel_type == "ftp":
 
-            file_url = f"{old_ingestion_url}/file/{process_instance_folder}/{file_name}"
-            file_path = os.path.join(process_instance_dir_path, file_name)
+            ftp_path = ingestion_config.get("path")
+            ftp_host = ingestion_config.get("host")
+            ftp_user = ingestion_config.get("userName", "anonymous")
+            encrypted_ftp_pass = ingestion_config.get("password", "")
 
-            print(f"⬇️ Downloading {file_name}...")
             try:
-                with requests.get(file_url, stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    with open(file_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                downloaded_count += 1
-            except Exception as e:
-                print(f"❌ Failed to download {file_name}: {str(e)}")
+                ftp_pass = decrypt_password(encrypted_ftp_pass, SECRET_KEY)
+            except Exception:
+                raise ValueError("Unable to decrypt FTP password")
 
-        print(f"✅ Successfully downloaded {downloaded_count}/{len(documents)} documents to {process_instance_dir_path}")
+            if not ftp_host or not ftp_path:
+                raise ValueError("FTP host or path is missing in blueprint")
+
+            print(f"🔌 Connecting to FTP server: {ftp_host}")
+            ftp = FTP()
+            ftp.connect(ftp_host, 21)
+            ftp.login(ftp_user, ftp_pass)
+            ftp_pi_path = (ftp_path + "/process-instance-" + str(process_instance_id))
+            print(f"📂 Navigating to FTP path: {ftp_pi_path}")
+            ftp.cwd(ftp_pi_path)
+
+            documents = ftp.nlst()  # List all files in directory
+            print(f"📄 Found {len(documents)} documents on FTP")
+            downloaded_count = 0
+
+            for file_name in documents:
+                file_name_lower = file_name.lower()
+                if not any(file_name_lower.endswith(ext) for ext in valid_extensions):
+                    print(f"⚠️ Skipping unsupported file: {file_name}")
+                    continue
+
+                file_path = os.path.join(process_instance_dir_path, file_name)
+                print(f"⬇️ Downloading {file_name} from FTP...")
+                try:
+                    with open(file_path, "wb") as f:
+                        ftp.retrbinary(f"RETR {file_name}", f.write)
+                    downloaded_count += 1
+                except Exception as e:
+                    print(f"❌ Failed to download {file_name}: {str(e)}")
+
+            ftp.quit()
+
+        elif channel_type == "ui":
+            ingestion_url = "http://69.62.81.68:3057/files/"
+            old_ingestion_url = ingestion_url
+            ingestion_url = ingestion_url + process_instance_folder
+
+            if not ingestion_url:
+                raise ValueError("Ingestion URL is missing in blueprint")
+
+            print(f"🔍 Fetching document list from HTTP: {ingestion_url}")
+            response = requests.get(ingestion_url, timeout=30)
+            response.raise_for_status()
+            documents = response.json()
+            print(f"📄 Found {len(documents)} documents at UI Portal")
+
+            for file_name in documents:
+                file_name_lower = file_name.lower()
+                if not any(file_name_lower.endswith(ext) for ext in valid_extensions):
+                    print(f"⚠️ Skipping unsupported file: {file_name}")
+                    continue
+
+                file_url = f"{old_ingestion_url}/file/{process_instance_folder}/{file_name}"
+                file_path = os.path.join(process_instance_dir_path, file_name)
+
+                print(f"⬇️ Downloading {file_name} from UI Portal...")
+                downloaded_count = 0
+                try:
+                    with requests.get(file_url, stream=True, timeout=30) as r:
+                        r.raise_for_status()
+                        with open(file_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                    downloaded_count += 1
+                except Exception as e:
+                    print(f"❌ Failed to download {file_name}: {str(e)}")
+
+        else:
+            raise ValueError(f"Unsupported channelType: {channel_type}")
+
 
         # 8. Trigger classify_documents_dag
-        print("🚀 Triggering classify_documents_dag...")
-        token = get_auth_token()
-        trigger_url = f"{AIRFLOW_API_URL}/dags/classify_documents_dag/dagRuns"
-        run_id = f"triggered_by_ingest_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "dag_run_id": run_id,
-            "logical_date": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-            "conf": {"id": process_instance_id}
-        }
+        if AUTO_EXECUTE_NEXT_NODE == 1:
+            print("🚀 Triggering classify_documents_dag...")
+            token = get_auth_token()
+            trigger_url = f"{AIRFLOW_API_URL}/dags/classify_documents_dag/dagRuns"
+            run_id = f"triggered_by_ingest_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            headers = {
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "dag_run_id": run_id,
+                "logical_date": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                "conf": {"id": process_instance_id}
+            }
 
-        response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
-        response.raise_for_status()
-        print(f"✅ Successfully triggered extract_documents_dag with ID {process_instance_id}")
+            response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
+            response.raise_for_status()
+            print(f"✅ Successfully triggered extract_documents_dag with ID {process_instance_id}")
         
     except Exception as e:
         conn.rollback()
