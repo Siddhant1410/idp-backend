@@ -12,6 +12,8 @@ import requests
 import shutil
 import base64
 
+AUTO_EXECUTE_NEXT_NODE = 0
+
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 SECRET_KEY = b'A7x!m3ZqP9t#F6vLb2r@X4hKd8WcY1eB'  # Must be 32 bytes

@@ -11,6 +11,8 @@ import json
 import re
 import requests
 
+AUTO_EXECUTE_NEXT_NODE = 0
+
 # === DAG Trigger CONFIG === #
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
 AIRFLOW_USERNAME = "airflow"
@@ -177,23 +179,24 @@ def validate_extracted_fields(**context):
     print(f"✅ Updated extracted_fields with fieldScore in {EXTRACTED_FIELDS_PATH}")
 
     # Trigger highlight_extracted_documents_dag
-    print("🚀 Triggering highlight_extracted_documents_dag...")
-    token = get_auth_token()
-    trigger_url = f"{AIRFLOW_API_URL}/dags/highlight_extracted_fields_dag/dagRuns"
-    run_id = f"triggered_by_validation_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "dag_run_id": run_id,
-        "logical_date": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-        "conf": {"id": process_instance_id}
-    }
+    if AUTO_EXECUTE_NEXT_NODE == 1:
+        print("🚀 Triggering highlight_extracted_documents_dag...")
+        token = get_auth_token()
+        trigger_url = f"{AIRFLOW_API_URL}/dags/highlight_extracted_fields_dag/dagRuns"
+        run_id = f"triggered_by_validation_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "dag_run_id": run_id,
+            "logical_date": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+            "conf": {"id": process_instance_id}
+        }
 
-    response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
-    response.raise_for_status()
-    print(f"✅ Successfully triggered highlight_extracted_documents_dag with ID {process_instance_id}")
+        response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
+        response.raise_for_status()
+        print(f"✅ Successfully triggered highlight_extracted_documents_dag with ID {process_instance_id}")
 
 
 # === DAG Definition ===

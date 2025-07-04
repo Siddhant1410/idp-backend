@@ -13,7 +13,7 @@ import base64
 
 SECRET_KEY = b'A7x!m3ZqP9t#F6vLb2r@X4hKd8WcY1eB'  # Must be exactly 32 bytes
 
-AUTO_EXECUTE_NEXT_NODE = 1
+AUTO_EXECUTE_NEXT_NODE = 0
 
 # === DAG Trigger CONFIG === #
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
