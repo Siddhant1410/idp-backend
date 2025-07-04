@@ -10,6 +10,9 @@ import re
 import requests
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 import openai
+from dotenv import load_dotenv
+
+load_dotenv() 
 
 AUTO_EXECUTE_NEXT_NODE = 0
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"
@@ -22,8 +25,10 @@ if LOCAL_MODE:
 
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 UPLOAD_URL = "http://69.62.81.68:3057/files"
-openai.api_key = "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"
 
+openai.api_key = os.getenv("OPENAI_API_KEY")  # from .env
+if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api_key.startswith("sk-proj-"):
+    raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
 
 def get_auth_token():
     auth_url = f"{AIRFLOW_API_URL.replace('/api/v2', '')}/auth/token"

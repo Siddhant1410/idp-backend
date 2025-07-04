@@ -11,12 +11,15 @@ import json
 import requests
 import shutil
 import base64
+from dotenv import load_dotenv
+
+load_dotenv() 
 
 AUTO_EXECUTE_NEXT_NODE = 0
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-SECRET_KEY = b'A7x!m3ZqP9t#F6vLb2r@X4hKd8WcY1eB'  # Must be 32 bytes
+SECRET_KEY = os.getenv("SECRET_KEY") # Must be 32 bytes
 
 # === AES Decryption ===
 def fix_base64_padding(s: str) -> str:

@@ -9,6 +9,10 @@ import pytesseract
 import requests
 from pdf2image import convert_from_path
 
+from dotenv import load_dotenv
+
+load_dotenv() 
+
 AUTO_EXECUTE_NEXT_NODE = 0
 
 # === DAG Trigger CONFIG === #
@@ -23,8 +27,10 @@ if LOCAL_MODE:
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 
-openai.api_key = "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"
-
+openai.api_key = os.getenv("OPENAI_API_KEY")  # from .env
+if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api_key.startswith("sk-proj-"):
+    raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
+    
 def get_auth_token():
     """Get JWT token from Airflow API"""
     auth_url = f"{AIRFLOW_API_URL.replace('/api/v2', '')}/auth/token"
