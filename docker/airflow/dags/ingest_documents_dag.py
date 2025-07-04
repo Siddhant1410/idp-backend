@@ -10,8 +10,11 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.backends import default_backend
 import base64
+from dotenv import load_dotenv
 
-SECRET_KEY = b'A7x!m3ZqP9t#F6vLb2r@X4hKd8WcY1eB'  # Must be exactly 32 bytes
+load_dotenv() 
+
+SECRET_KEY = os.getenv("SECRET_KEY")  # Must be exactly 32 bytes
 
 AUTO_EXECUTE_NEXT_NODE = 0
 
