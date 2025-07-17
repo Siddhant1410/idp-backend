@@ -8,6 +8,8 @@ import json
 import pytesseract
 import requests
 from pdf2image import convert_from_path
+from airflow.utils.log.logging_mixin import LoggingMixin
+log = LoggingMixin().log
 
 from dotenv import load_dotenv
 
@@ -20,6 +22,7 @@ AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localho
 AIRFLOW_USERNAME = "airflow"
 AIRFLOW_PASSWORD = "airflow"
 LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
+MAX_PAGES_TO_SCAN = 100
 
 if LOCAL_MODE:
     AIRFLOW_API_URL = "http://localhost:8080/api/v2"
@@ -45,11 +48,20 @@ def get_auth_token():
 
 def extract_text_from_pdf(pdf_path):
     try:
-        images = convert_from_path(pdf_path)
-        return " ".join(pytesseract.image_to_string(img) for img in images)
+        from PyPDF2 import PdfReader
+        reader = PdfReader(pdf_path)
+        total_pages = len(reader.pages)
+
+        texts = []
+        for i in range(1, total_pages + 1):
+            images = convert_from_path(pdf_path, first_page=i, last_page=i)
+            if images:
+                text = pytesseract.image_to_string(images[0])
+                texts.append(text)
+        return texts
     except Exception as e:
         print(f"❌ OCR failed for {pdf_path}: {e}")
-        return ""
+        return []
 
 def correct_typos_with_genai(extracted_data):
     try:
@@ -143,25 +155,43 @@ def extract_fields_from_documents(**context):
         extracted = {}
 
         for field in field_prompts:
-            prompt = f"""
-            The following is OCR-extracted text. Extract value for field: "{field['variableName']}".
-            Return only the value without any additional text or explanation. If not found, return "N/A".
+            field_name = field["variableName"]
+            extracted_value = "N/A"
+            for page_num in range(1, MAX_PAGES_TO_SCAN + 1):
+                try:
+                    images = convert_from_path(doc_path, first_page=page_num, last_page=page_num)
+                    if not images:
+                        continue
+                    page_image = images[0]
+                    page_text = pytesseract.image_to_string(page_image)
 
-            Text:
-            {ocr_text[:1500]}
-            """
-            try:
-                print(f"🔍 Extracting {field['variableName']} from {file_name}")
-                response = openai.ChatCompletion.create(
-                    model="gpt-4o",
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=0.2,
-                    timeout=30
-                )
-                value = response["choices"][0]["message"]["content"].strip()
-                extracted[field["variableName"]] = value
-            except Exception as e:
-                extracted[field["variableName"]] = f"Error: {e}"
+                    prompt = f"""
+                            The following is OCR-extracted text (Page {page_num} of the document). 
+                            Extract the value for field: "{field_name}".
+                            Return only the value without any additional text or explanation. If not found, return "N/A".
+
+                            Text:
+                            {page_text[:1500]}
+                                            """
+
+                    log.info(f"🔍 Searching {field_name} from page {page_num} of {file_name}")
+                    response = openai.ChatCompletion.create(
+                        model="gpt-4o",
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.2,
+                        timeout=30
+                    )
+
+                    value = response["choices"][0]["message"]["content"].strip()
+                    extracted[field_name] = value
+
+                    if value and value.upper() != "N/A":
+                        break  # ✅ Stop once value is found
+
+                except Exception as e:
+                    print(f"⚠️ Error extracting {field_name} from page {page_num}: {e}")
+                    extracted[field_name] = f"Error: {e}"
+                    break
 
         # Compose final JSON structure
         structured_results.append({

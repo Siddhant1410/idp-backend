@@ -10,6 +10,7 @@ from pdf2image import convert_from_path
 import tempfile
 import requests
 from dotenv import load_dotenv
+from PyPDF2 import PdfReader
 
 load_dotenv() 
 
@@ -46,11 +47,19 @@ def get_auth_token():
 
 # === OCR Extraction Function === #
 def extract_text_from_pdf(pdf_path):
-    images = convert_from_path(pdf_path)
-    text = ""
-    for img in images:
-        text += pytesseract.image_to_string(img)
-    return text
+    try:
+        reader = PdfReader(pdf_path)
+        total_pages = len(reader.pages)
+        texts = []
+        for i in range(1, total_pages + 1):
+            images = convert_from_path(pdf_path, first_page=i, last_page=i)
+            if images:
+                text = pytesseract.image_to_string(images[0])
+                texts.append(text)
+        return texts
+    except Exception as e:
+        print(f"❌ OCR failed for {pdf_path}: {e}")
+        return []
 
 def classify_documents(**context):
     process_instance_id = context["dag_run"].conf.get("id")
@@ -130,24 +139,36 @@ def classify_documents(**context):
 
         file_path = os.path.join(process_instance_dir_path, file_name)
         try:
-            print(f"🧾 Extracting text from: {file_name}")
-            extracted_text = extract_text_from_pdf(file_path)
+            print(f"📄 Classifying: {file_name}")
 
-            prompt = f"Given this document content, classify it into one of: {label_str}.\n\nContent:\n{extracted_text}. Return only the type, without any analysis or justification."
+            page_text = extract_text_from_pdf(file_path)
+
+            if not page_text:
+                raise ValueError("Empty or unreadable text extracted from first few pages.")
+
+            prompt = f"""
+            Given this partial document content, classify it into one of these categories: {label_str}.
+            Respond with only the most likely document type from the list. No explanation.
+
+            Content:
+            {page_text[:1500]}
+            """
 
             response = openai.ChatCompletion.create(
                 model="gpt-4o",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.2,
-                timeout=30,
+                timeout=20,
             )
+
             classification = response["choices"][0]["message"]["content"].strip()
             results[file_name] = classification
-            
+
             if classification not in target_labels:
                 print(f"⚠️ Warning: {file_name} → unexpected classification: {classification}")
+            else:
+                print(f"✅ {file_name} → {classification}")
 
-            print(f"✅ {file_name} → {classification}")
         except Exception as e:
             results[file_name] = f"Error: {e}"
             print(f"❌ {file_name} → {e}")
