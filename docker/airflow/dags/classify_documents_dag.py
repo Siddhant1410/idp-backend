@@ -34,7 +34,6 @@ if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api
     raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
 
 def get_auth_token():
-    """Get JWT token from Airflow API"""
     auth_url = f"{AIRFLOW_API_URL.replace('/api/v2', '')}/auth/token"
     response = requests.post(
         auth_url,
@@ -45,27 +44,25 @@ def get_auth_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-# === OCR Extraction Function === #
-def extract_text_from_pdf(pdf_path):
+def extract_text_per_page(pdf_path, max_pages=10):
     try:
         reader = PdfReader(pdf_path)
-        total_pages = len(reader.pages)
-        texts = []
-        for i in range(1, total_pages + 1):
-            images = convert_from_path(pdf_path, first_page=i, last_page=i)
-            if images:
-                text = pytesseract.image_to_string(images[0])
-                texts.append(text)
-        return texts
+        total_pages = min(len(reader.pages), max_pages)
+        for i in range(total_pages):
+            images = convert_from_path(pdf_path, first_page=i+1, last_page=i+1)
+            if not images:
+                continue
+            text = pytesseract.image_to_string(images[0])
+            yield text
     except Exception as e:
         print(f"❌ OCR failed for {pdf_path}: {e}")
-        return []
+        return
 
 def classify_documents(**context):
     process_instance_id = context["dag_run"].conf.get("id")
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
-    
+
     process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, "process-instance-" + str(process_instance_id))
     os.makedirs(process_instance_dir_path, exist_ok=True)
     blueprint_path = os.path.join(process_instance_dir_path, "blueprint.json")
@@ -74,14 +71,12 @@ def classify_documents(**context):
     conn = hook.get_conn()
     cursor = conn.cursor()
 
-    # Step 2: Fetch blueprint JSON
     if not os.path.exists(blueprint_path):
         raise FileNotFoundError(f"❌ blueprint.json not found at {blueprint_path}. Please run ingestion DAG first.")
 
     with open(blueprint_path, "r") as f:
         blueprint = json.load(f)
 
-    # Step 3: Update ProcessInstances table to reflect current stage
     cursor.execute(
         """
         UPDATE ProcessInstances
@@ -95,7 +90,6 @@ def classify_documents(**context):
     conn.commit()
     print(f"🟢 ProcessInstances updated → currentStage='Classification', isInstanceRunning=1 for process_instance_id={process_instance_id}")
 
-    # Step 4: Extract classify node
     classify_node = next((n for n in blueprint if n["nodeName"].lower() == "classify"), None)
     if not classify_node:
         raise ValueError("Classification node not found in blueprint")
@@ -106,24 +100,18 @@ def classify_documents(**context):
 
     target_labels = [c["documentType"] for c in categories]
     label_str = ", ".join(target_labels)
-
     results = {}
 
-    # Step 5: Insert or activate document types in DocumentType table
     for doc_type in target_labels:
-        # Check if documentType already exists
         cursor.execute("SELECT id FROM DocumentType WHERE documentType = %s", (doc_type,))
         exists = cursor.fetchone()
-
         if exists:
-            # Set isActive = 1 if already present
             cursor.execute("""
                 UPDATE DocumentType
                 SET isActive = 1, updatedAt = NOW()
                 WHERE documentType = %s
             """, (doc_type,))
         else:
-            # Insert new documentType
             cursor.execute("""
                 INSERT INTO DocumentType (documentType, isActive, createdAt)
                 VALUES (%s, 1, NOW())
@@ -131,8 +119,6 @@ def classify_documents(**context):
     conn.commit()
     print("✅ DocumentType table updated → isActive=1 for target document types")
 
-
-    # Step 6: Classify each file using OCR + GenAI
     for file_name in os.listdir(process_instance_dir_path):
         if not file_name.endswith(".pdf"):
             continue
@@ -140,46 +126,43 @@ def classify_documents(**context):
         file_path = os.path.join(process_instance_dir_path, file_name)
         try:
             print(f"📄 Classifying: {file_name}")
+            accumulated_text = ""
+            for page_number, page_text in enumerate(extract_text_per_page(file_path, max_pages=20), start=1):
+                accumulated_text += page_text + "\n"
+                prompt = f"""
+                Classify the document based on the following content into one of these categories: {label_str}.
+                Return only the label, nothing else.
+                
+                Content:
+                {accumulated_text[:2000]}
+                """
 
-            page_text = extract_text_from_pdf(file_path)
+                response = openai.ChatCompletion.create(
+                    model="gpt-4o",
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    timeout=20,
+                )
 
-            if not page_text:
-                raise ValueError("Empty or unreadable text extracted from first few pages.")
+                classification = response["choices"][0]["message"]["content"].strip()
+                print(f"🔍 Page {page_number}: classified as {classification}")
 
-            prompt = f"""
-            Given this partial document content, classify it into one of these categories: {label_str}.
-            Respond with only the most likely document type from the list. No explanation.
-
-            Content:
-            {page_text[:1500]}
-            """
-
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                timeout=20,
-            )
-
-            classification = response["choices"][0]["message"]["content"].strip()
-            results[file_name] = classification
-
-            if classification not in target_labels:
-                print(f"⚠️ Warning: {file_name} → unexpected classification: {classification}")
+                if classification in target_labels:
+                    results[file_name] = classification
+                    print(f"✅ {file_name} → {classification} (stopped early at page {page_number})")
+                    break
             else:
-                print(f"✅ {file_name} → {classification}")
+                results[file_name] = "Unknown"
+                print(f"⚠️ {file_name} → Unable to classify after scanning max pages")
 
         except Exception as e:
             results[file_name] = f"Error: {e}"
             print(f"❌ {file_name} → {e}")
 
-    # Save classification results to JSON for next DAG
     with open(os.path.join(process_instance_dir_path, "classified_documents.json"), "w") as f:
         json.dump(results, f)
         print("📝 Classification results saved to classified_documents.json")
 
-
-    # Step 7: Deactivate the document types (mark isActive = 0)
     for doc_type in target_labels:
         cursor.execute("""
             UPDATE DocumentType
@@ -189,7 +172,6 @@ def classify_documents(**context):
     conn.commit()
     print("🔕 DocumentType table updated → isActive=0 after classification.")
 
-    # 8. Trigger extract_documents_dag
     if AUTO_EXECUTE_NEXT_NODE == 1:
         print("🚀 Triggering extract_documents_dag...")
         token = get_auth_token()
@@ -209,8 +191,6 @@ def classify_documents(**context):
         response.raise_for_status()
         print(f"✅ Successfully triggered extract_documents_dag with ID {process_instance_id}")
 
-
-# === DAG Definition ===
 with DAG(
     dag_id="classify_documents_dag",
     start_date=datetime.now() - timedelta(days=1),
