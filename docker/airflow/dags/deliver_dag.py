@@ -15,11 +15,14 @@ from dotenv import load_dotenv
 
 load_dotenv() 
 
-AUTO_EXECUTE_NEXT_NODE = 0
+AUTO_EXECUTE_NEXT_NODE = 1
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-SECRET_KEY = os.getenv("SECRET_KEY") # Must be 32 bytes
+SECRET_KEY = os.getenv("SECRET_KEY").encode() # Must be 32 bytes
+
+if len(SECRET_KEY) != 32:
+    raise ValueError("SECRET_KEY must be exactly 32 bytes (after encoding)")
 
 # === AES Decryption ===
 def fix_base64_padding(s: str) -> str:
@@ -45,7 +48,7 @@ def deliver_documents(**context):
     
     process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, f"process-instance-{process_instance_id}")
     BLUEPRINT_PATH = os.path.join(process_instance_dir_path, "blueprint.json")
-    RESPONSE_BODY_PATH = os.path.join(process_instance_dir_path, "response_body.json")
+    RESPONSE_BODY_PATH = os.path.join(process_instance_dir_path, "cleaned_extracted_fields.json")
     print(f"Blueprint path:", BLUEPRINT_PATH)
 
     hook = MySqlHook(mysql_conn_id="idp_mysql")

@@ -18,8 +18,8 @@ AUTO_EXECUTE_NEXT_NODE = 0
 
 # === DAG Trigger CONFIG === #
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
-AIRFLOW_USERNAME = "airflow"
-AIRFLOW_PASSWORD = "airflow"
+AIRFLOW_USERNAME = "admin"
+AIRFLOW_PASSWORD = "admin"
 LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
 
 if LOCAL_MODE:

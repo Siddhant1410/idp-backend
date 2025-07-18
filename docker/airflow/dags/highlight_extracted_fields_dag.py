@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 
 load_dotenv() 
 
-AUTO_EXECUTE_NEXT_NODE = 0
+AUTO_EXECUTE_NEXT_NODE = 1
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"
-AIRFLOW_USERNAME = "airflow"
-AIRFLOW_PASSWORD = "airflow"
+AIRFLOW_USERNAME = "admin"
+AIRFLOW_PASSWORD = "admin"
 LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
 
 if LOCAL_MODE:
@@ -83,7 +83,15 @@ def highlight_and_upload(**context):
     for doc in extracted_data:
         document_name = doc["documentDetails"]["documentName"]
         document_type = doc["documentDetails"]["documentType"]
-        fields = doc.get("extractedFields", {})
+        raw_fields = doc.get("extractedFields", {})
+        fields = []
+
+        if isinstance(raw_fields, dict):
+            for k, v in raw_fields.items():
+                fields.append({"fieldName": k, "fieldValue": v})
+        else:
+            print(f"⚠️ Unexpected format for extractedFields: {type(raw_fields)}")
+
         pid = doc.get("processInstanceId")
 
         pdf_path = os.path.join(dir_path, document_name)

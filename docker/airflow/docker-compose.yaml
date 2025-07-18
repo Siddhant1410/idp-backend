@@ -123,6 +123,8 @@ services:
     command: api-server
     ports:
       - "8080:8080"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
       interval: 30s
@@ -138,6 +140,8 @@ services:
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
       interval: 30s
@@ -168,6 +172,8 @@ services:
   airflow-worker:
     <<: *airflow-common
     command: celery worker
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       # yamllint disable rule:line-length
       test:
