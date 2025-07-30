@@ -30,7 +30,7 @@ LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
 if LOCAL_MODE:
     AIRFLOW_API_URL = "http://localhost:8080/api/v2"
 
-# === CONFIG ===
+# === CONFIG === #
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 AUTO_EXECUTE_NEXT_NODE = 0
 MONGO_DB_NAME = "idp"
@@ -254,7 +254,7 @@ def fetch_blueprint_and_download_docs(**context):
 
             ftp.quit()
 
-        elif channel_type == "ui":
+        elif channel_type == "ui" or channel_type == "api":
             ingestion_url = INGESTION_URL
             old_ingestion_url = ingestion_url
             ingestion_url = ingestion_url + process_instance_folder
