@@ -6,8 +6,10 @@ import logging
 import requests
 import json
 import os
+from dotenv import load_dotenv
 
 # Configuration
+load_dotenv() 
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # Use service name for Docker
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD")

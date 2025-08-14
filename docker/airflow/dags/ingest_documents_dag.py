@@ -32,7 +32,7 @@ if LOCAL_MODE:
 
 # === CONFIG === #
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-AUTO_EXECUTE_NEXT_NODE = 0
+AUTO_EXECUTE_NEXT_NODE = 1
 MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
 mongo_client = MongoClient(MONGO_URI)
