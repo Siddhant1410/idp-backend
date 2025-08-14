@@ -4,7 +4,8 @@ from airflow.providers.mysql.hooks.mysql import MySqlHook
 from datetime import datetime, timedelta
 import os
 import json
-import openai
+from openai import OpenAI
+from opik.integrations.openai import track_openai
 import pytesseract
 from pdf2image import convert_from_path
 import tempfile
@@ -15,13 +16,15 @@ from pymongo import MongoClient
 
 load_dotenv() 
 
-AUTO_EXECUTE_NEXT_NODE = 1
+AUTO_EXECUTE_NEXT_NODE = 0
 MONGO_URI = os.getenv("MONGO_URI")
 
 # === DAG Trigger CONFIG === #
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD")
+OPIK_API_KEY = os.getenv("OPIK_API_KEY")  
+OPIK_PROJECT_NAME= "idp-classification"
 LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
 
 if LOCAL_MODE:
@@ -30,14 +33,16 @@ if LOCAL_MODE:
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # from .env
-openai.api_key = OPENAI_API_KEY
+OpenAI.api_key = OPENAI_API_KEY
 MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
 mongo_client = MongoClient(MONGO_URI)
 mongo_collection = mongo_client[MONGO_DB_NAME][MONGO_COLLECTION]
+openai_client = OpenAI()  
+openai_client = track_openai(openai_client, project_name="my-idp-project")
 
 
-if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api_key.startswith("sk-proj-"):
+if not OpenAI.api_key or not OpenAI.api_key.startswith("sk-") and not OpenAI.api_key.startswith("sk-proj-"):
     raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
 
 def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
@@ -167,7 +172,7 @@ def classify_documents(**context):
                     {accumulated_text[:2000]}
                     """
 
-                    response = openai.ChatCompletion.create(
+                    response = openai_client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.2,
