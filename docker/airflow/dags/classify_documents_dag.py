@@ -179,7 +179,7 @@ def classify_documents(**context):
                         timeout=20,
                     )
 
-                    classification = response["choices"][0]["message"]["content"].strip()
+                    classification = response.choices[0].message.content.strip()
                     print(f"🔍 Page {page_number}: classified as {classification}")
                     log_to_mongo(process_instance_id, message = f"Page {page_number}: classified as {classification}", node_name = "Classification", log_type=2)
 
