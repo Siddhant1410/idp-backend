@@ -103,13 +103,13 @@ def correct_typos_with_genai(extracted_data):
         JSON:
         {json.dumps(extracted_data, indent=2)}
         """
-        response = openai.ChatCompletion.create(
+        response = openai_client.chat.completions.create(
             model="gpt-4o",
             messages=[{"role": "user", "content": prompt}],
             temperature=0,
             timeout=60
         )
-        content = response["choices"][0]["message"]["content"].strip()
+        content = response.choices[0].message.content.strip()
         if content.startswith("```json"):
             content = content.replace("```json", "").replace("```", "").strip()
         return json.loads(content)
