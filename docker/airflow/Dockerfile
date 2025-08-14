@@ -1,7 +1,7 @@
 FROM apache/airflow:3.0.1-python3.10
 
 USER airflow
-RUN pip install openai==0.28 pytesseract pdf2image pyspellchecker Pillow img2pdf rapidfuzz fuzzywuzzy PyPDF2 pymongo
+RUN pip install openai pytesseract pdf2image pyspellchecker Pillow img2pdf rapidfuzz fuzzywuzzy PyPDF2 pymongo opik
 USER airflow
 
 USER root
