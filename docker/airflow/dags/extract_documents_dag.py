@@ -2,7 +2,8 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from datetime import datetime, timedelta
-import openai
+from openai import OpenAI
+from opik.integrations.openai import track_openai
 import os
 import json
 import pytesseract
@@ -22,6 +23,9 @@ AUTO_EXECUTE_NEXT_NODE = 1
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # from .env
+OpenAI.api_key = OPENAI_API_KEY
+OPIK_API_KEY = os.getenv("OPIK_API_KEY")  
 LOCAL_MODE = os.getenv("LOCAL_MODE", "false").lower() == "true"
 MAX_PAGES_TO_SCAN = 100
 
@@ -35,9 +39,10 @@ MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
 mongo_client = MongoClient(MONGO_URI)
 mongo_collection = mongo_client[MONGO_DB_NAME][MONGO_COLLECTION]
+openai_client = OpenAI()  
+openai_client = track_openai(openai_client, project_name="my-idp-project")
 
-openai.api_key = os.getenv("OPENAI_API_KEY")  # from .env
-if not openai.api_key or not openai.api_key.startswith("sk-") and not openai.api_key.startswith("sk-proj-"):
+if not OpenAI.api_key or not OpenAI.api_key.startswith("sk-") and not OpenAI.api_key.startswith("sk-proj-"):
     raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
     
 def get_auth_token():
@@ -205,14 +210,14 @@ def extract_fields_from_documents(**context):
                                             """
 
                     log.info(f"🔍 Searching {field_name} from page {page_num} of {file_name}")
-                    response = openai.ChatCompletion.create(
+                    response = openai_client.chat.completions.create(
                         model="gpt-4o",
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.2,
                         timeout=30
                     )
 
-                    value = response["choices"][0]["message"]["content"].strip()
+                    value = response.choices[0].message.content.strip()
                     extracted[field_name] = value
 
                     if value and value.upper() != "N/A":
