@@ -202,3 +202,5 @@ Thumbs.db
 stucture.txt
 /docker/airflow/downloaded_docs
 /docker/airflow/docs_classifier/data
+*.json
+*.pdf

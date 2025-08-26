@@ -9,6 +9,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 import time
 import signal
 from contextlib import contextmanager
+import json
+import os
+from datetime import datetime
 
 # Timeout decorator to prevent hanging
 class TimeoutException(Exception):
@@ -24,6 +27,45 @@ def time_limit(seconds):
         yield
     finally:
         signal.alarm(0)
+
+# --------- Save extraction results to JSON ---------
+def save_extraction_results(document_path, extracted_fields, output_dir=os.getcwd()):
+    """
+    Save extracted field results to a JSON file
+    
+    Args:
+        document_path (str): Path to the source document
+        extracted_fields (dict): Dictionary of field_name: extracted_value pairs
+        output_dir (str): Directory to save results (default: "results")
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Extract document name from path
+    document_name = os.path.basename(document_path)
+    
+    # Prepare the result structure
+    result_data = {
+        "document": document_name,
+        # "extraction_timestamp": datetime.now().isoformat(),
+        "fields": extracted_fields
+    }
+    
+    # Generate output filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_filename = f"cleaned_extracted_fields.json"
+    output_path = output_filename
+    #os.path.join(output_dir, output_filename)
+    
+    # Save to JSON file
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(result_data, f, indent=2, ensure_ascii=False)
+        print(f"✅ Results saved to: {output_path}")
+        return output_path
+    except Exception as e:
+        print(f"❌ Failed to save results: {e}")
+        return None
 
 # --------- Load vectors from field_vectors.pkl ---------
 try:
@@ -169,6 +211,7 @@ def main():
     parser.add_argument("--fields", nargs="+", required=True, help="Target fields to extract")
     parser.add_argument("--threshold", type=float, default=0.3, help="Similarity threshold (0.0-1.0)")
     parser.add_argument("--max-pages", type=int, default=5, help="Maximum pages to process")
+    parser.add_argument("--output-dir", type=str, default="results", help="Directory to save JSON results")
     args = parser.parse_args()
 
     print(f"🚀 Starting extraction from {args.pdf_path}")
@@ -189,14 +232,21 @@ def main():
         print(f"⏰ Time taken: {elapsed:.2f}s")
         results[field] = val if val else "Not Found"
 
+    # Save results to JSON file
+    json_path = save_extraction_results(args.pdf_path, results, args.output_dir)
+
     print("\n" + "="*50)
     print("📝 EXTRACTION RESULTS:")
     print("="*50)
     for k, v in results.items():
         print(f"  {k}: {v}")
+    
+    if json_path:
+        print(f"\n💾 Results saved to: {json_path}")
 
 if __name__ == "__main__":
     main()
+
 # Example Usage:
 # python classify_fields.py "/path/to/doc.pdf" --fields "Aadhar Number" "User Name" "Date of Issue"
-
+# python classify_fields.py "/path/to/doc.pdf" --fields "Aadhar Number" "PAN Number" --output-dir "extraction_results"
