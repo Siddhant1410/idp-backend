@@ -206,3 +206,4 @@ stucture.txt
 *.pdf
 /docker/airflow/docs_classifier
 /docker/airflow/fields_extractor
+/docker/airflow/logs
