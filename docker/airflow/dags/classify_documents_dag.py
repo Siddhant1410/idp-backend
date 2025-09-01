@@ -3,6 +3,7 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from datetime import datetime, timedelta
 import os
+import re
 import json
 from openai import OpenAI
 from opik.integrations.openai import track_openai
@@ -20,7 +21,7 @@ from sentence_transformers import SentenceTransformer
 
 load_dotenv() 
 
-AUTO_EXECUTE_NEXT_NODE = 1
+AUTO_EXECUTE_NEXT_NODE = 0
 MONGO_URI = os.getenv("MONGO_URI")
 
 # === DAG Trigger CONFIG === #
@@ -36,6 +37,7 @@ if LOCAL_MODE:
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+ML_MODELS_DIR = "/opt/airflow/dags/ml_models"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # from .env
 OpenAI.api_key = OPENAI_API_KEY
 MONGO_DB_NAME = "idp"
@@ -119,12 +121,13 @@ def _load_vector_assets(base_dir: str):
         return _VECTOR_CACHE
 
     search_dirs = [base_dir, os.getcwd()]
+    print(f'ML models Dir:', ML_MODELS_DIR)
     tfidf_pkl = embeddings_pkl = vectorizer_pkl = None
 
     for d in search_dirs:
-        t = os.path.join(d, "ml_models/classify_tfidf_vectors.pkl")
-        e = os.path.join(d, "ml_models/classify_/embeddings.pkl")
-        v = os.path.join(d, "ml_models/classify_/vectorizer.pkl")
+        t = os.path.join(ML_MODELS_DIR, "classify_tfidf_vectors.pkl")
+        e = os.path.join(ML_MODELS_DIR, "classify_embeddings.pkl")
+        v = os.path.join(ML_MODELS_DIR, "classify_vectorizer.pkl")
         if os.path.exists(t) and os.path.exists(v):
             tfidf_pkl = t
             vectorizer_pkl = v

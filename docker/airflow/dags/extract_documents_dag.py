@@ -11,6 +11,7 @@ import requests
 from pdf2image import convert_from_path
 from airflow.utils.log.logging_mixin import LoggingMixin
 import re
+from PyPDF2 import PdfReader
 import pickle
 import numpy as np
 from sklearn.metrics.pairwise import cosine_similarity
@@ -73,7 +74,7 @@ def time_limit(seconds):
 try:
     VECTOR_PATH = os.path.join(ML_MODELS_DIR, "field_vectors.pkl")
     print(f"🔍 Loading ML vectors from {VECTOR_PATH}")
-    with open(VECTOR_PATH "rb") as f:
+    with open(VECTOR_PATH, "rb") as f:
         ml_data = pickle.load(f)
     print("✅ Loaded field_vectors.pkl for ML extraction")
 except Exception as e:
@@ -101,6 +102,32 @@ def preprocess_text(text):
     text = text.strip()
     text = re.sub(r'\s+', ' ', text)
     return text.lower()
+
+# ---------------- Extract text from PDF (ML) ----------------
+def ml_extract_text_from_pdf(pdf_path, max_pages=5):
+    text_content = []
+    try:
+        reader = PdfReader(pdf_path)
+        num_pages = min(len(reader.pages), max_pages)
+
+        for i in range(num_pages):
+            text = reader.pages[i].extract_text()
+            if text and text.strip():
+                text_content.append(text)
+            else:
+                try:
+                    with time_limit(30):
+                        images = convert_from_path(pdf_path, first_page=i+1, last_page=i+1)
+                        if images:
+                            text = pytesseract.image_to_string(images[0])
+                            if text.strip():
+                                text_content.append(text)
+                except Exception as e:
+                    print(f"⚠️ OCR error on page {i+1} of {pdf_path}: {e}")
+    except Exception as e:
+        print(f"⚠️ Error reading {pdf_path}: {e}")
+
+    return "\n".join(text_content)
 
 # ---------------- ML Field Extraction ----------------
 def classify_text_for_field(field_name, text, threshold=0.3):
@@ -293,7 +320,7 @@ def extract_fields_from_documents(**context):
             # Run ML-based extraction
             try:
                 print(f"🤖 Using ML extractor for {file_name} ({doc_type})")
-                ocr_text_full = extract_text_from_pdf(doc_path, max_pages=5)
+                ocr_text_full = ml_extract_text_from_pdf(doc_path, max_pages=5)
                 for field in field_prompts:
                     field_label = field["field_to_extract"]
                     field_var = field["variableName"]
