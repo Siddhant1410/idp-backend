@@ -41,6 +41,7 @@ if LOCAL_MODE:
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+ML_MODELS_DIR = "/opt/airflow/dags/ml_models"
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
@@ -70,7 +71,9 @@ def time_limit(seconds):
 
 # ---------------- Load ML field vectors ----------------
 try:
-    with open("field_vectors.pkl", "rb") as f:
+    VECTOR_PATH = os.path.join(ML_MODELS_DIR, "field_vectors.pkl")
+    print(f"🔍 Loading ML vectors from {VECTOR_PATH}")
+    with open(VECTOR_PATH "rb") as f:
         ml_data = pickle.load(f)
     print("✅ Loaded field_vectors.pkl for ML extraction")
 except Exception as e:
