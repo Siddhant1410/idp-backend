@@ -25,7 +25,7 @@ from pymongo import MongoClient
 
 load_dotenv() 
 
-AUTO_EXECUTE_NEXT_NODE = 0
+AUTO_EXECUTE_NEXT_NODE = 1
 
 # === DAG Trigger CONFIG === #
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"  # or localhost in local mode

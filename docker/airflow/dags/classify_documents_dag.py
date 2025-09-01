@@ -21,7 +21,7 @@ from sentence_transformers import SentenceTransformer
 
 load_dotenv() 
 
-AUTO_EXECUTE_NEXT_NODE = 0
+AUTO_EXECUTE_NEXT_NODE = 1
 MONGO_URI = os.getenv("MONGO_URI")
 
 # === DAG Trigger CONFIG === #
