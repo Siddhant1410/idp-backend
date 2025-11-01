@@ -155,6 +155,48 @@ def deliver_documents(**context):
                     print(f"📤 Posted: {filename}")
                     log_to_mongo(process_instance_id, message = f"Posted: {filename}", node_name = "Deliver", log_type=2)
                     uploaded_count += 1
+    
+        elif channel_type == "workflow":
+            workflow_id = component.get("workflowId")
+            workflow_name = component.get("workflowName", "Unnamed Workflow")
+
+            if not workflow_id:
+                raise ValueError("Workflow ID missing in deliver blueprint")
+                log_to_mongo(process_instance_id, message="Workflow ID missing in deliver blueprint", node_name="Deliver", log_type=1)
+
+            deliver_api_url = "http://31.97.224.212:3057/process-instances/deliver-to-workflow" 
+            if not deliver_api_url:
+                raise ValueError("DELIVER_TO_WORKFLOW_URL environment variable not set")
+                log_to_mongo(process_instance_id, message="DELIVER_TO_WORKFLOW_URL not set", node_name="Deliver", log_type=1)
+
+            payload = {
+                "processInstanceId": process_instance_id,
+                "workflowId": workflow_id
+            }
+
+            try:
+                print(f"🔄 Delivering to workflow: {workflow_name} ({workflow_id}) via {deliver_api_url}")
+                response = requests.post(deliver_api_url, json=payload, timeout=30)
+                response.raise_for_status()
+
+                print(f"✅ Successfully delivered processInstanceId {process_instance_id} to workflow {workflow_name}")
+                log_to_mongo(
+                    process_instance_id,
+                    node_name="Deliver",
+                    message=f"Delivered processInstanceId {process_instance_id} to workflow {workflow_name} ({workflow_id})",
+                    log_type=2
+                )
+
+            except requests.exceptions.RequestException as e:
+                print(f"❌ Failed to deliver to workflow: {str(e)}")
+                log_to_mongo(
+                    process_instance_id,
+                    node_name="Deliver",
+                    message=f"Failed to deliver to workflow {workflow_name}: {str(e)}",
+                    log_type=1
+                )
+                raise
+
     else:
         raise ValueError(f"Unsupported channelType in deliver node: {channel_type}")
         log_to_mongo(process_instance_id, message = f"Unsupported channelType in deliver node: {channel_type}", node_name = "Deliver", log_type=1)
