@@ -3,6 +3,7 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from datetime import datetime, timedelta
 import os
+import re
 import json
 from openai import OpenAI
 from opik.integrations.openai import track_openai
@@ -13,6 +14,10 @@ import requests
 from dotenv import load_dotenv
 from PyPDF2 import PdfReader
 from pymongo import MongoClient
+import joblib
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 
 load_dotenv() 
 
@@ -32,6 +37,7 @@ if LOCAL_MODE:
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+ML_MODELS_DIR = "/opt/airflow/dags/ml_models"
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # from .env
 OpenAI.api_key = OPENAI_API_KEY
 MONGO_DB_NAME = "idp"
@@ -44,6 +50,176 @@ openai_client = track_openai(openai_client, project_name="my-idp-project")
 
 if not OpenAI.api_key or not OpenAI.api_key.startswith("sk-") and not OpenAI.api_key.startswith("sk-proj-"):
     raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
+
+# ============================
+# ML CLASSIFICATION HELPERS
+# ============================
+
+_EMB_MODEL = None
+_VECTOR_CACHE = None  # cache loaded PKLs
+
+def _normalize_text(text: str) -> str:
+    text = text or ""
+    text = text.lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+def _extract_pdf_text_ml(file_path: str, max_pages: int = 10) -> str:
+    """
+    Efficient text extraction with OCR fallback up to `max_pages`.
+    """
+    text_parts = []
+    try:
+        reader = PdfReader(file_path)
+        pages = min(len(reader.pages), max_pages)
+        for i in range(pages):
+            try:
+                t = reader.pages[i].extract_text() or ""
+            except Exception:
+                t = ""
+            if t.strip():
+                text_parts.append(t)
+            else:
+                # OCR fallback (single page)
+                try:
+                    images = convert_from_path(file_path, first_page=i+1, last_page=i+1)
+                    if images:
+                        ocr_text = pytesseract.image_to_string(images[0]) or ""
+                        if ocr_text.strip():
+                            text_parts.append(ocr_text)
+                except Exception:
+                    # keep going, don't fail the run
+                    pass
+    except Exception:
+        # if PdfReader fails, try OCR of first `max_pages` pages
+        try:
+            images = convert_from_path(file_path, first_page=1, last_page=max_pages)
+            for img in images:
+                ocr_text = pytesseract.image_to_string(img) or ""
+                if ocr_text.strip():
+                    text_parts.append(ocr_text)
+        except Exception:
+            pass
+
+    return _normalize_text("\n".join(text_parts))
+
+def _get_embedding_model():
+    global _EMB_MODEL
+    if _EMB_MODEL is None:
+        _EMB_MODEL = SentenceTransformer("all-MiniLM-L6-v2")
+    return _EMB_MODEL
+
+def _load_vector_assets(base_dir: str):
+    """
+    Load and cache vector PKLs from process-instance folder (preferred) or CWD.
+    Required: tfidf_vectors.pkl + vectorizer.pkl
+    Optional: embeddings.pkl
+    """
+    global _VECTOR_CACHE
+    if _VECTOR_CACHE and _VECTOR_CACHE.get("base_dir") == base_dir:
+        return _VECTOR_CACHE
+
+    search_dirs = [base_dir, os.getcwd()]
+    print(f'ML models Dir:', ML_MODELS_DIR)
+    tfidf_pkl = embeddings_pkl = vectorizer_pkl = None
+
+    for d in search_dirs:
+        t = os.path.join(ML_MODELS_DIR, "classify_tfidf_vectors.pkl")
+        e = os.path.join(ML_MODELS_DIR, "classify_embeddings.pkl")
+        v = os.path.join(ML_MODELS_DIR, "classify_vectorizer.pkl")
+        if os.path.exists(t) and os.path.exists(v):
+            tfidf_pkl = t
+            vectorizer_pkl = v
+        if os.path.exists(e):
+            embeddings_pkl = e
+
+    if not tfidf_pkl or not vectorizer_pkl:
+        raise FileNotFoundError(
+            "Missing TF–IDF assets. Expecting tfidf_vectors.pkl and vectorizer.pkl "
+            f"in {base_dir} or current working directory."
+        )
+
+    tfidf_data = joblib.load(tfidf_pkl)          # expects keys: {"labels", "vectors"}
+    vectorizer = joblib.load(vectorizer_pkl)     # sklearn vectorizer
+    embeddings_data = joblib.load(embeddings_pkl) if embeddings_pkl else None  # {"labels","vectors"}
+
+    _VECTOR_CACHE = {
+        "base_dir": base_dir,
+        "tfidf_data": tfidf_data,
+        "vectorizer": vectorizer,
+        "embeddings_data": embeddings_data,
+        "embeddings_pkl": embeddings_pkl,
+    }
+    return _VECTOR_CACHE
+
+def classify_document_ml(
+    file_path: str,
+    base_dir: str,
+    target_labels=None,
+    threshold_embed: float = 0.35,
+    threshold_tfidf: float = 0.25,
+    max_pages: int = 10
+) -> str:
+    """
+    Classify a PDF using prebuilt vectors (embeddings -> TF-IDF fallback).
+    Returns a label or "Unknown".
+    """
+    try:
+        assets = _load_vector_assets(base_dir)
+    except Exception as e:
+        print(f"❌ ML assets load failed: {e}")
+        return "Unknown"
+
+    tfidf_data     = assets["tfidf_data"]
+    vectorizer     = assets["vectorizer"]
+    embeddings_data= assets["embeddings_data"]
+
+    text = _extract_pdf_text_ml(file_path, max_pages=max_pages)
+    if not text.strip():
+        return "Unknown"
+
+    # 1) Embeddings first (if available)
+    if embeddings_data:
+        try:
+            emb_labels = embeddings_data["labels"]
+            emb_vecs   = embeddings_data["vectors"]
+            model      = _get_embedding_model()
+            qvec       = model.encode([text], convert_to_numpy=True)
+            sims       = cosine_similarity(qvec, emb_vecs)[0]
+            idx        = int(np.argmax(sims))
+            score      = float(sims[idx])
+            print(f"🔹 {os.path.basename(file_path)} | Embedding similarity = {score:.3f}")
+
+            if score >= threshold_embed:
+                pred = emb_labels[idx]
+                if (not target_labels) or (pred in target_labels):
+                    return pred
+                else:
+                    print(f"⚠️ Pred '{pred}' not in blueprint categories; will try TF–IDF fallback.")
+        except Exception as e:
+            print(f"⚠️ Embedding stage failed: {e} — falling back to TF–IDF")
+
+    # 2) TF–IDF fallback
+    try:
+        tf_labels = tfidf_data["labels"]
+        tf_vecs   = tfidf_data["vectors"]
+        qtf       = vectorizer.transform([text]).toarray()
+        sims      = cosine_similarity(qtf, tf_vecs)[0]
+        idx       = int(np.argmax(sims))
+        score     = float(sims[idx])
+        print(f"🔹 {os.path.basename(file_path)} | TF–IDF similarity = {score:.3f}")
+
+        if score >= threshold_tfidf:
+            pred = tf_labels[idx]
+            if (not target_labels) or (pred in target_labels):
+                return pred
+    except Exception as e:
+        print(f"⚠️ TF–IDF stage failed: {e}")
+
+    print(f"⚠️ {os.path.basename(file_path)} → Unknown")
+    return "Unknown"
+# ============================
 
 def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
     try:
@@ -157,10 +333,52 @@ def classify_documents(**context):
         for file_name in os.listdir(process_instance_dir_path):
             if not file_name.endswith(".pdf"):
                 continue
-
+            
             file_path = os.path.join(process_instance_dir_path, file_name)
+
+            ###     CHECK FOR CLASSIFICATION MODEL HERE GENAI/ML     ###
+            # Read classification model from blueprint ("genai" or "ml")
+            model_choice = (classify_node["component"].get("model") or "genai").strip().lower()
+            use_ml = (model_choice == "ml")
+
+            if use_ml:
+                print("🧠 Using ML classifier (embeddings → TF-IDF fallback)")
+                log_to_mongo(process_instance_id, node_name="Classification",
+                            message="Using ML classifier (vectors pipeline)", log_type=0)
+                # Preload/validate vector assets once (raises if missing)
+                try:
+                    _ = _load_vector_assets(process_instance_dir_path)
+                except Exception as e:
+                    err = f"ML assets not available: {e}"
+                    print(f"❌ {err}")
+                    log_to_mongo(process_instance_id, node_name="Classification", message=err, log_type=1)
+                    raise
+            else:
+                print("🤖 Using GENAI classifier")
+                log_to_mongo(process_instance_id, node_name="Classification",
+                            message="Using GENAI classifier", log_type=0)
+
             try:
                 print(f"📄 Classifying: {file_name}")
+                # If ML is selected, classify once with the ML pipeline and skip GENAI loop
+                if use_ml:
+                    classification = classify_document_ml(
+                        file_path=file_path,
+                        base_dir=process_instance_dir_path,
+                        target_labels=target_labels,   # restrict to blueprint categories
+                        threshold_embed=0.35,
+                        threshold_tfidf=0.25,
+                        max_pages=10
+                    )
+                    results[file_name] = classification
+                    print(f"✅ {file_name} → {classification} (ML)")
+                    log_to_mongo(process_instance_id,
+                                message=f"{file_name} → {classification} (ML)",
+                                node_name="Classification",
+                                log_type=2 if classification != 'Unknown' else 3)
+                    continue  # IMPORTANT: skip the GENAI page-by-page code below
+
+                # --- GENAI classification (page-by-page) ---
                 accumulated_text = ""
                 for page_number, page_text in enumerate(extract_text_per_page(file_path, max_pages=20), start=1):
                     accumulated_text += page_text + "\n"

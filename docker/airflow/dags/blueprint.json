@@ -1,0 +1,127 @@
+[
+  {
+    "nodeName": "Ingestion",
+    "component": {
+      "channelType": "ui",
+      "path": "upload/ingestion",
+      "host": "69.62.81.68",
+      "userName": "ftpuser",
+      "password": "",
+      "url": ""
+    }
+  },
+  {
+    "nodeName": "Classify",
+    "component": {
+      "model": "genai",
+      "categories": [
+        {
+          "id": 1,
+          "documentType": "Pan Card",
+          "sampleDocument": {
+            "fileUrl": "http://69.62.81.68:3057/files/file?path=20250619T090027809Z_545646654654546_7676566_009%20(1).pdf",
+            "fileName": "545646654654546_7676566_009 (1).pdf",
+            "size": 686871
+          },
+          "description": "Pan Card",
+          "createdAt": "2025-06-19T09:00:46.000Z",
+          "updatedAt": "2025-06-30T11:38:15.000Z",
+          "deletedAt": null,
+          "isDeleted": false,
+          "isActive": false,
+          "remark": null
+        },
+        {
+          "id": 2,
+          "documentType": "Aadhar Card",
+          "sampleDocument": {
+            "fileUrl": "http://69.62.81.68:3057/files/file/20250628T115946122Z_Aadhar_Siddhant.pdf",
+            "fileName": "Aadhar_Siddhant.pdf",
+            "size": 152420
+          },
+          "description": "Aadhar Card",
+          "createdAt": "2025-06-28T11:59:48.000Z",
+          "updatedAt": "2025-06-30T11:38:15.000Z",
+          "deletedAt": null,
+          "isDeleted": false,
+          "isActive": false,
+          "remark": null
+        }
+      ]
+    }
+  },
+  {
+    "nodeName": "Extract",
+    "component": {
+      "categories": [
+        {
+          "id": 1,
+          "documentType": "Pan Card",
+          "sampleDocument": {
+            "fileUrl": "http://69.62.81.68:3057/files/file?path=20250619T090027809Z_545646654654546_7676566_009%20(1).pdf",
+            "fileName": "545646654654546_7676566_009 (1).pdf",
+            "size": 686871
+          },
+          "description": "Pan Card",
+          "createdAt": "2025-06-19T09:00:46.000Z",
+          "updatedAt": "2025-06-30T11:38:15.000Z",
+          "deletedAt": null,
+          "isDeleted": false,
+          "isActive": false,
+          "remark": null
+        },
+        {
+          "id": 2,
+          "documentType": "Aadhar Card",
+          "sampleDocument": {
+            "fileUrl": "http://69.62.81.68:3057/files/file/20250628T115946122Z_Aadhar_Siddhant.pdf",
+            "fileName": "Aadhar_Siddhant.pdf",
+            "size": 152420
+          },
+          "description": "Aadhar Card",
+          "createdAt": "2025-06-28T11:59:48.000Z",
+          "updatedAt": "2025-06-30T11:38:15.000Z",
+          "deletedAt": null,
+          "isDeleted": false,
+          "isActive": false,
+          "remark": null
+        }
+      ],
+      "extractors": {
+        "1": "genai",
+        "2": "genai"
+      },
+      "extractorFields": {
+        "1": [
+          {
+            "prompt": "From the given PAN Card, extract PAN Card number. Return value only.",
+            "variableName": "pan_number"
+          }
+        ],
+        "2": [
+          {
+            "prompt": "From the given Aadhar Card, extract Name. Return value only.",
+            "variableName": "user_name"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "nodeName": "Validate",
+    "component": {
+      "method": "human"
+    }
+  },
+  {
+    "nodeName": "Deliver",
+    "component": {
+      "channelType": "ftp",
+      "path": "upload/documents/",
+      "host": "69.62.81.68 ",
+      "userName": "ftpuser",
+      "password": "aXYMBx6v3jtp9c384hDvhiYwkZ8+isp/SHD/3rTnwAc9tfVRpromTuRLtGDuV0RM",
+      "url": ""
+    }
+  }
+]

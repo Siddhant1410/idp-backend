@@ -10,6 +10,14 @@ import pytesseract
 import requests
 from pdf2image import convert_from_path
 from airflow.utils.log.logging_mixin import LoggingMixin
+import re
+from PyPDF2 import PdfReader
+import pickle
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+import signal
+from contextlib import contextmanager
+from sentence_transformers import SentenceTransformer
 log = LoggingMixin().log
 
 from dotenv import load_dotenv
@@ -34,6 +42,7 @@ if LOCAL_MODE:
 
 # === CONFIG ===
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+ML_MODELS_DIR = "/opt/airflow/dags/ml_models"
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
@@ -44,7 +53,122 @@ openai_client = track_openai(openai_client, project_name="my-idp-project")
 
 if not OpenAI.api_key or not OpenAI.api_key.startswith("sk-") and not OpenAI.api_key.startswith("sk-proj-"):
     raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
-    
+
+
+# ---------------- Timeout ----------------
+class TimeoutException(Exception):
+    pass
+
+@contextmanager
+def time_limit(seconds):
+    def signal_handler(signum, frame):
+        raise TimeoutException("Timed out!")
+    signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+
+# ---------------- Load ML field vectors ----------------
+try:
+    VECTOR_PATH = os.path.join(ML_MODELS_DIR, "field_vectors.pkl")
+    print(f"🔍 Loading ML vectors from {VECTOR_PATH}")
+    with open(VECTOR_PATH, "rb") as f:
+        ml_data = pickle.load(f)
+    print("✅ Loaded field_vectors.pkl for ML extraction")
+except Exception as e:
+    print(f"❌ Failed to load field_vectors.pkl: {e}")
+    ml_data = {}
+
+ml_vectorizer = ml_data.get("tfidf_vectorizer")
+ml_X_tfidf = ml_data.get("X_tfidf")
+ml_labels = ml_data.get("labels", [])
+ml_X_emb = ml_data.get("X_emb", None)
+
+embedding_model_name = "all-MiniLM-L6-v2"
+ml_model = None
+if ml_X_emb is not None and embedding_model_name:
+    try:
+        ml_model = SentenceTransformer(embedding_model_name)
+        print(f"✅ Embedding model {embedding_model_name} loaded for ML extraction")
+    except Exception as e:
+        print(f"⚠️ Failed to load embedding model: {e}")
+
+# ---------------- Preprocess ----------------
+def preprocess_text(text):
+    if not text:
+        return ""
+    text = text.strip()
+    text = re.sub(r'\s+', ' ', text)
+    return text.lower()
+
+# ---------------- Extract text from PDF (ML) ----------------
+def ml_extract_text_from_pdf(pdf_path, max_pages=5):
+    text_content = []
+    try:
+        reader = PdfReader(pdf_path)
+        num_pages = min(len(reader.pages), max_pages)
+
+        for i in range(num_pages):
+            text = reader.pages[i].extract_text()
+            if text and text.strip():
+                text_content.append(text)
+            else:
+                try:
+                    with time_limit(30):
+                        images = convert_from_path(pdf_path, first_page=i+1, last_page=i+1)
+                        if images:
+                            text = pytesseract.image_to_string(images[0])
+                            if text.strip():
+                                text_content.append(text)
+                except Exception as e:
+                    print(f"⚠️ OCR error on page {i+1} of {pdf_path}: {e}")
+    except Exception as e:
+        print(f"⚠️ Error reading {pdf_path}: {e}")
+
+    return "\n".join(text_content)
+
+# ---------------- ML Field Extraction ----------------
+def classify_text_for_field(field_name, text, threshold=0.3):
+    if not text.strip():
+        return None
+
+    candidates = re.split(r"[\n\t:;|]", text)
+    candidates = [preprocess_text(c) for c in candidates if len(c.strip()) > 3]
+
+    if not candidates:
+        return None
+
+    best_val, best_score = None, -1
+
+    # Embedding similarity
+    if ml_model and ml_X_emb is not None:
+        try:
+            cand_emb = ml_model.encode(candidates, convert_to_numpy=True, normalize_embeddings=True)
+            sims = cosine_similarity(cand_emb, ml_X_emb)
+            for i, cand in enumerate(candidates):
+                for j, label in enumerate(ml_labels):
+                    if label == field_name and sims[i][j] > best_score:
+                        best_score = sims[i][j]
+                        best_val = cand
+            if best_score >= threshold:
+                return best_val
+        except Exception as e:
+            print(f"⚠️ Embedding error for {field_name}: {e}")
+
+    # TF–IDF fallback
+    if ml_vectorizer is not None and ml_X_tfidf is not None:
+        cand_tfidf = ml_vectorizer.transform(candidates)
+        sims = cosine_similarity(cand_tfidf, ml_X_tfidf)
+        for i, cand in enumerate(candidates):
+            for j, label in enumerate(ml_labels):
+                if label == field_name and sims[i][j] > best_score:
+                    best_score = sims[i][j]
+                    best_val = cand
+
+    return best_val if best_score >= threshold else None
+
 def get_auth_token():
     """Get JWT token from Airflow API"""
     auth_url = f"{AIRFLOW_API_URL.replace('/api/v2', '')}/auth/token"
@@ -189,45 +313,65 @@ def extract_fields_from_documents(**context):
         field_prompts = extractor_fields[str(doc_type_id)]
         extracted = {}
 
-        for field in field_prompts:
-            field_name = field["variableName"]
-            extracted_value = "N/A"
-            for page_num in range(1, MAX_PAGES_TO_SCAN + 1):
-                try:
-                    images = convert_from_path(doc_path, first_page=page_num, last_page=page_num)
-                    if not images:
-                        continue
-                    page_image = images[0]
-                    page_text = pytesseract.image_to_string(page_image)
+        ### Choose extraction method based on config ###
+        extractor_method = extractors.get(str(doc_type_id), "genai").lower()
 
-                    prompt = f"""
-                            The following is OCR-extracted text (Page {page_num} of the document). 
-                            Extract the value for field: "{field_name}".
-                            Return only the value without any additional text or explanation. If not found, return "N/A".
+        if extractor_method == "ml":
+            # Run ML-based extraction
+            try:
+                print(f"🤖 Using ML extractor for {file_name} ({doc_type})")
+                ocr_text_full = ml_extract_text_from_pdf(doc_path, max_pages=5)
+                for field in field_prompts:
+                    field_label = field["field_to_extract"]
+                    field_var = field["variableName"]
 
-                            Text:
-                            {page_text[:1500]}
-                                            """
+                    val = classify_text_for_field(field_label, ocr_text_full, threshold=0.3)
+                    extracted[field_var] = val if val else "Not Found"
+            except Exception as e:
+                print(f"❌ ML extraction failed for {file_name}: {e}")
+                log_to_mongo(process_instance_id, message = f"ML extraction failed for {file_name}: {e}", node_name = "Extraction", log_type=1)
+        else:
+            # Run GenAI-based extraction
+            print(f"🤖 Using GenAI extractor for {file_name} ({doc_type})")
+            for field in field_prompts:
+                field_name = field["variableName"]
+                extracted_value = "N/A"
+                for page_num in range(1, MAX_PAGES_TO_SCAN + 1):
+                    try:
+                        images = convert_from_path(doc_path, first_page=page_num, last_page=page_num)
+                        if not images:
+                            continue
+                        page_image = images[0]
+                        page_text = pytesseract.image_to_string(page_image)
 
-                    log.info(f"🔍 Searching {field_name} from page {page_num} of {file_name}")
-                    response = openai_client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.2,
-                        timeout=30
-                    )
+                        prompt = f"""
+                                The following is OCR-extracted text (Page {page_num} of the document). 
+                                Extract the value for field: "{field_name}".
+                                Return only the value without any additional text or explanation. If not found, return "N/A".
 
-                    value = response.choices[0].message.content.strip()
-                    extracted[field_name] = value
+                                Text:
+                                {page_text[:1500]}
+                                                """
 
-                    if value and value.upper() != "N/A":
-                        break  # ✅ Stop once value is found
+                        log.info(f"🔍 Searching {field_name} from page {page_num} of {file_name}")
+                        response = openai_client.chat.completions.create(
+                            model="gpt-4o",
+                            messages=[{"role": "user", "content": prompt}],
+                            temperature=0.2,
+                            timeout=30
+                        )
 
-                except Exception as e:
-                    print(f"⚠️ Error extracting {field_name} from page {page_num}: {e}")
-                    log_to_mongo(process_instance_id, message = f"Error extracting {field_name} from page {page_num}: {e}", node_name = "Extraction", log_type=1)
-                    extracted[field_name] = f"Error: {e}"
-                    break
+                        value = response.choices[0].message.content.strip()
+                        extracted[field_name] = value
+
+                        if value and value.upper() != "N/A":
+                            break  # ✅ Stop once value is found
+
+                    except Exception as e:
+                        print(f"⚠️ Error extracting {field_name} from page {page_num}: {e}")
+                        log_to_mongo(process_instance_id, message = f"Error extracting {field_name} from page {page_num}: {e}", node_name = "Extraction", log_type=1)
+                        extracted[field_name] = f"Error: {e}"
+                        break
 
         # Compose final JSON structure
         structured_results.append({
