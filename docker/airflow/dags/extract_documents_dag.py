@@ -335,6 +335,7 @@ def extract_fields_from_documents(**context):
             print(f"🤖 Using GenAI extractor for {file_name} ({doc_type})")
             for field in field_prompts:
                 field_name = field["variableName"]
+                inp_prompt = field["prompt"]
                 extracted_value = "N/A"
                 for page_num in range(1, MAX_PAGES_TO_SCAN + 1):
                     try:
@@ -343,15 +344,22 @@ def extract_fields_from_documents(**context):
                             continue
                         page_image = images[0]
                         page_text = pytesseract.image_to_string(page_image)
-
-                        prompt = f"""
+                        
+                        if not inp_prompt:
+                            prompt = f"""
                                 The following is OCR-extracted text (Page {page_num} of the document). 
                                 Extract the value for field: "{field_name}".
                                 Return only the value without any additional text or explanation. If not found, return "N/A".
+				If the value is numeric, do not ever include the value in words. e.g. If value is Fifty, return '50' and not 'Fifty'.
+                                when value is supposed to be in multiple outputs, create an array of objects. 
 
                                 Text:
                                 {page_text[:1500]}
                                                 """
+                        else:
+                            prompt = f"{inp_prompt}\nText:\n{page_text[:1500]}"
+
+                        print("Prompt Used: " + prompt)
 
                         log.info(f"🔍 Searching {field_name} from page {page_num} of {file_name}")
                         response = openai_client.chat.completions.create(

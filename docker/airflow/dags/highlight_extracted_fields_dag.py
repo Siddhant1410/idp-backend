@@ -30,12 +30,14 @@ if LOCAL_MODE:
     AIRFLOW_API_URL = "http://localhost:8080/api/v2"
 
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-UPLOAD_URL = "http://69.62.81.68:3057/files"
+UPLOAD_URL = "https://api.docognize.ai/files"
 
 MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
 mongo_client = MongoClient(MONGO_URI)
 mongo_collection = mongo_client[MONGO_DB_NAME][MONGO_COLLECTION]
+openai_client = OpenAI()  
+openai_client = track_openai(openai_client, project_name="my-idp-project")
 
 if not OpenAI.api_key or not OpenAI.api_key.startswith("sk-") and not OpenAI.api_key.startswith("sk-proj-"):
     raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
@@ -146,12 +148,15 @@ def highlight_and_upload(**context):
             Field Name: {field_name}
             Extracted Value: {value}
             Validation Rules:
-            - Look for the extracted value in the OCR text.
-            - Minor spelling errors or OCR typos should not reduce the score.
-            - Only consider the format or presence of value.
-            - Do NOT penalize spelling mistakes unless they alter the actual meaning.
-            Return result in this format:
-            Score: <number between 0-100>.
+            - Compare the extracted value with the OCR text semantically, not word-by-word.
+	    - Minor paraphrasing, reordering, or punctuation differences should still count as a strong match.
+	    - Return a confidence score between 0–100:
+  	    - 90–100: Strong match (semantically equivalent).
+  	    - 60–89: Partial match (some overlap but not full).
+  	    - 30–59: Weak match (topic is related but value is incomplete or vague).
+  	    - 0–29: Not found.
+	    Return result in this format:
+	    Score: <number between 0-100>
             """
             try:
                 response = openai_client.chat.completions.create(
