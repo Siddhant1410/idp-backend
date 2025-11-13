@@ -164,7 +164,7 @@ def deliver_documents(**context):
             raise ValueError("Workflow ID missing in deliver blueprint")
             log_to_mongo(process_instance_id, message="Workflow ID missing in deliver blueprint", node_name="Deliver", log_type=1)
 
-        deliver_api_url = "https://workflow.docognize.ai/process-instances/deliver-to-workflow" 
+        deliver_api_url = "https://api.docognize.ai/process-instances/deliver-to-workflow" 
         if not deliver_api_url:
             raise ValueError("DELIVER_TO_WORKFLOW_URL environment variable not set")
             log_to_mongo(process_instance_id, message="DELIVER_TO_WORKFLOW_URL not set", node_name="Deliver", log_type=1)
