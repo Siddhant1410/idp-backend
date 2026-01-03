@@ -16,7 +16,7 @@ from pymongo import MongoClient
 
 load_dotenv() 
 
-AUTO_EXECUTE_NEXT_NODE = 1
+AUTO_EXECUTE_NEXT_NODE = 0
 AIRFLOW_API_URL = "http://airflow-airflow-apiserver-1:8080/api/v2"
 AIRFLOW_USERNAME = os.getenv("AIRFLOW_USERNAME")
 AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD")

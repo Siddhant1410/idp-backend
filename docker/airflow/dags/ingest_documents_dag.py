@@ -32,7 +32,7 @@ if LOCAL_MODE:
 
 # === CONFIG === #
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
-AUTO_EXECUTE_NEXT_NODE = 1
+AUTO_EXECUTE_NEXT_NODE = 0
 MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
 mongo_client = MongoClient(MONGO_URI)
@@ -97,245 +97,158 @@ def get_auth_token():
 
 
 def fetch_blueprint_and_download_docs(**context):
-    # Get process instance ID from DAG run configuration
     process_instance_id = context["dag_run"].conf.get("id")
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
-        log_to_mongo(process_instance_id, message = "Missing process_instance_id in dag_run.conf", node_name = "Ingestion", log_type=1)
-        
+
     global AUTO_EXECUTE_NEXT_NODE
     valid_extensions = ['.pdf']
 
-    process_instance_dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, f"process-instance-{process_instance_id}")
+    process_instance_dir_path = os.path.join(
+        LOCAL_DOWNLOAD_DIR, f"process-instance-{process_instance_id}"
+    )
     os.makedirs(process_instance_dir_path, exist_ok=True)
+
     BLUEPRINT_JSON_PATH = os.path.join(process_instance_dir_path, "blueprint.json")
-    
-    # Initialize MySQL connection
+
+    if not os.path.exists(BLUEPRINT_JSON_PATH):
+        raise ValueError("Blueprint JSON not found. Orchestrator must generate it first.")
+
+    # Load blueprint written by orchestrator
+    with open(BLUEPRINT_JSON_PATH, "r") as f:
+        blueprint_json = json.load(f)
+
+    # ---------------- MySQL connection (unchanged) ---------------- #
     hook = MySqlHook(mysql_conn_id="idp_mysql")
     conn = hook.get_conn()
     cursor = conn.cursor()
-    
+
     try:
-        # 1. Get the process_id linked to this instance
+        # 1. Get processInstanceFolderName
         cursor.execute("""
-            SELECT processesId 
-            FROM ProcessInstances 
+            SELECT processInstanceFolderName
+            FROM ProcessInstances
             WHERE id = %s
         """, (process_instance_id,))
         instance_data = cursor.fetchone()
-        
+
         if not instance_data:
             raise ValueError(f"No process instance found with ID {process_instance_id}")
-            log_to_mongo(process_instance_id, message = f"No process instance found with ID {process_instance_id}", node_name = "Ingestion", log_type=1)
-        process_id = instance_data[0]  # Using index instead of dictionary access
-
-
-        #get the process-instance-folder-name
-        cursor.execute("""
-            SELECT processInstanceFolderName 
-            FROM ProcessInstances 
-            WHERE id = %s
-        """, (process_instance_id,))
-        instance_data = cursor.fetchone()
 
         process_instance_folder = instance_data[0]
 
-        # 2. Get bluePrintId from Processes
-        cursor.execute("SELECT bluePrintId FROM Processes WHERE id = %s", (process_id,))
-        blueprint_id_row = cursor.fetchone()
-        if not blueprint_id_row or not blueprint_id_row[0]:
-            raise ValueError(f"No bluePrintId found for process ID {process_id}")
-            log_to_mongo(process_instance_id, message = f"No bluePrintId found for process ID {process_id}", node_name = "Ingestion", log_type=1)
-        blueprint_id = blueprint_id_row[0]
-        log_to_mongo(process_instance_id, "Ingestion", "Blueprint saved successfully", log_type=2)
-
-
-        # 3. Get blueprint JSON from BluePrint table
-        cursor.execute("SELECT bluePrint FROM BluePrint WHERE id = %s", (blueprint_id,))
-        blueprint_row = cursor.fetchone()
-        if not blueprint_row or not blueprint_row[0]:
-            raise ValueError(f"No blueprint found for blueprint ID {blueprint_id}")
-            log_to_mongo(process_instance_id, message = f"No blueprint found for blueprint ID {blueprint_id}", node_name = "Ingestion", log_type=1)
-        
-        blueprint_json = json.loads(blueprint_row[0])
-
-        # Save blueprint locally for other DAGs
-        os.makedirs(process_instance_dir_path, exist_ok=True)
-        with open(BLUEPRINT_JSON_PATH, "w") as f:
-            json.dump(blueprint_json, f, indent=2)
-        print(f"✅ Blueprint saved to {BLUEPRINT_JSON_PATH}")
-
-        # 4. Update ProcessInstances table
+        # 2. Update ProcessInstances stage
         cursor.execute("""
-        UPDATE ProcessInstances
-        SET currentStage = %s,
-            isInstanceRunning = %s,
-            updatedAt = NOW()
-        WHERE id = %s
+            UPDATE ProcessInstances
+            SET currentStage = %s,
+                isInstanceRunning = %s,
+                updatedAt = NOW()
+            WHERE id = %s
         """, ("Ingestion", 1, process_instance_id))
         conn.commit()
-        print(f"✅ Updated ProcessInstance {process_instance_id} to Ingestion stage")
-        log_to_mongo(process_instance_id, "Ingestion", "ProcessInstance stage updated to 'Ingestion'", log_type=2)
 
+        log_to_mongo(
+            process_instance_id,
+            "Ingestion",
+            "ProcessInstance stage updated to 'Ingestion'",
+            log_type=2
+        )
 
-        # 5. Find ingestion node configuration
+        # 3. Find ingestion node from blueprint
         ingestion_node = next(
-            (node for node in blueprint_json 
-             if isinstance(node, dict) and node.get("nodeName", "").lower() == "ingestion"), 
+            (node for node in blueprint_json
+             if node.get("nodeName", "").lower() == "ingestion"),
             None
         )
+
         if not ingestion_node:
             raise ValueError("No ingestion node found in blueprint")
-            log_to_mongo(process_instance_id, message = f"No ingestion node found in blueprint", node_name = "Ingestion", log_type=1)
 
         ingestion_config = ingestion_node.get("component", {})
-        ingestion_url = ingestion_config.get("url")
-        old_ingestion_url = ingestion_url
-        ingestion_url = ingestion_url + process_instance_folder
+        channel_type = ingestion_config.get("channelType", "").lower()
 
-        if not ingestion_url:
-            raise ValueError("Ingestion URL is missing in blueprint")
-            log_to_mongo(process_instance_id, message = f"Ingestion URL is missing in blueprint", node_name = "Ingestion", log_type=1)
+        print(f"📥 Ingestion Channel Type: {channel_type}")
 
-        # 6. Handle ingestion based on channelType
-        channel_type = ingestion_config.get("channelType").lower()
-        print(f"Ingestion Channel Type: {channel_type}")
         documents = []
 
+        # ---------------- FTP INGESTION ---------------- #
         if channel_type == "ftp":
-
             ftp_path = ingestion_config.get("path")
             ftp_host = ingestion_config.get("host")
             ftp_user = ingestion_config.get("userName", "anonymous")
             encrypted_ftp_pass = ingestion_config.get("password", "")
 
-            try:
-                ftp_pass = decrypt_password(encrypted_ftp_pass, SECRET_KEY)
-            except Exception:
-                raise ValueError("Unable to decrypt FTP password")
-                log_to_mongo(process_instance_id, message = f"Unable to decrypt FTP password", node_name = "Ingestion", log_type=1)
-                AUTO_EXECUTE_NEXT_NODE = 0
+            ftp_pass = decrypt_password(encrypted_ftp_pass, SECRET_KEY)
 
-            if not ftp_host or not ftp_path:
-                raise ValueError("FTP host or path is missing in blueprint")
-                log_to_mongo(process_instance_id, message = f"FTP host or path is missing in blueprint", node_name = "Ingestion", log_type=1)
-                AUTO_EXECUTE_NEXT_NODE = 0
-
-            print(f"🔌 Connecting to FTP server: {ftp_host}")
             ftp = FTP()
             ftp.connect(ftp_host, 21)
             ftp.login(ftp_user, ftp_pass)
-            ftp_pi_path = (ftp_path + "/process-instance-" + str(process_instance_id))
-            print(f"📂 Navigating to FTP path: {ftp_pi_path}")
+
+            ftp_pi_path = f"{ftp_path}/process-instance-{process_instance_id}"
             ftp.cwd(ftp_pi_path)
 
-            documents = ftp.nlst()  # List all files in directory
-            print(f"📄 Found {len(documents)} documents on FTP")
-            downloaded_count = 0
+            documents = ftp.nlst()
 
             for file_name in documents:
-                file_name_lower = file_name.lower()
-                if not any(file_name_lower.endswith(ext) for ext in valid_extensions):
-                    print(f"⚠️ Skipping unsupported file: {file_name}")
-                    log_to_mongo(process_instance_id, message = f"Skipping unsupported file: {file_name}", node_name = "Ingestion", log_type=3)
+                if not file_name.lower().endswith(tuple(valid_extensions)):
                     continue
 
                 file_path = os.path.join(process_instance_dir_path, file_name)
-                print(f"⬇️ Downloading {file_name} from FTP...")
-                try:
-                    with open(file_path, "wb") as f:
-                        ftp.retrbinary(f"RETR {file_name}", f.write)
-                    downloaded_count += 1
-                    log_to_mongo(process_instance_id, "Ingestion", f"Downloaded {downloaded_count} documents successfully", log_type=2)
-                except Exception as e:
-                    print(f"❌ Failed to download {file_name}: {str(e)}")
-                    log_to_mongo(process_instance_id, "Ingestion", f"Failed to Download Documents.", log_type=1)
-                    AUTO_EXECUTE_NEXT_NODE = 0
+                with open(file_path, "wb") as f:
+                    ftp.retrbinary(f"RETR {file_name}", f.write)
+
+                log_to_mongo(
+                    process_instance_id,
+                    "Ingestion",
+                    f"Downloaded {file_name}",
+                    log_type=2
+                )
 
             ftp.quit()
 
-        elif channel_type == "ui" or channel_type == "api":
-            ingestion_url = INGESTION_URL
-            old_ingestion_url = ingestion_url
-            ingestion_url = ingestion_url + process_instance_folder
-
-            if not ingestion_url:
-                raise ValueError("Ingestion URL is missing in blueprint")
-                log_to_mongo(process_instance_id, message = f"Ingestion URL is missing in blueprint", node_name = "Ingestion", log_type=1)
-                AUTO_EXECUTE_NEXT_NODE = 0
-
-            print(f"🔍 Fetching document list from HTTP: {ingestion_url}")
+        # ---------------- UI / API INGESTION ---------------- #
+        elif channel_type in ["ui", "api"]:
+            ingestion_url = INGESTION_URL + process_instance_folder
             response = requests.get(ingestion_url, timeout=30)
             response.raise_for_status()
+
             documents = response.json()
-            print(f"📄 Found {len(documents)} documents at UI Portal")
 
             for file_name in documents:
-                file_name_lower = file_name.lower()
-                if not any(file_name_lower.endswith(ext) for ext in valid_extensions):
-                    print(f"⚠️ Skipping unsupported file: {file_name}")
-                    log_to_mongo(process_instance_id, message = f"Skipping unsupported file: {file_name}", node_name = "Ingestion", log_type=3)
+                if not file_name.lower().endswith(tuple(valid_extensions)):
                     continue
 
-                file_url = f"{old_ingestion_url}/file/{process_instance_folder}/{file_name}"
+                file_url = f"{INGESTION_URL}/file/{process_instance_folder}/{file_name}"
                 file_path = os.path.join(process_instance_dir_path, file_name)
 
-                print(f"⬇️ Downloading {file_name} from UI Portal...")
-                downloaded_count = 0
-                try:
-                    with requests.get(file_url, stream=True, timeout=30) as r:
-                        r.raise_for_status()
-                        with open(file_path, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                    downloaded_count += 1
-                    log_to_mongo(process_instance_id, "Ingestion", f"Downloaded {downloaded_count} documents successfully", log_type=2)
-                except Exception as e:
-                    print(f"❌ Failed to download {file_name}: {str(e)}")
-                    log_to_mongo(process_instance_id, "Ingestion", f"Failed to Download Documents.", log_type=1)
-                    AUTO_EXECUTE_NEXT_NODE = 0
+                with requests.get(file_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(file_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+
+                log_to_mongo(
+                    process_instance_id,
+                    "Ingestion",
+                    f"Downloaded {file_name}",
+                    log_type=2
+                )
 
         else:
             raise ValueError(f"Unsupported channelType: {channel_type}")
 
-
-        # 8. Trigger classify_documents_dag
-        if AUTO_EXECUTE_NEXT_NODE == 1:
-            print("🚀 Triggering classify_documents_dag...")
-            token = get_auth_token()
-            trigger_url = f"{AIRFLOW_API_URL}/dags/classify_documents_dag/dagRuns"
-            run_id = f"triggered_by_ingest_{process_instance_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            headers = {
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "dag_run_id": run_id,
-                "logical_date": datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
-                "conf": {"id": process_instance_id}
-            }
-
-            response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
-            response.raise_for_status()
-            print(f"✅ Successfully triggered extract_documents_dag with ID {process_instance_id}")
-            log_to_mongo(process_instance_id, "Ingestion", "Successfully triggered classify_documents_dag", log_type=2)
-
     except Exception as e:
-    
         conn.rollback()
-        error_message = f"{type(e).__name__}: {str(e)}"
-        print(f"❌ Error in ingestion process: {error_message}")
+        AUTO_EXECUTE_NEXT_NODE = 0
 
         log_to_mongo(
-            process_instance_id=process_instance_id,
-            node_name="Ingestion",
-            message=error_message,
+            process_instance_id,
+            "Ingestion",
+            str(e),
             log_type=1,
-            remark="DAG failed at ingestion"
+            remark="Ingestion failed"
         )
-
         raise
-
 
     finally:
         cursor.close()
