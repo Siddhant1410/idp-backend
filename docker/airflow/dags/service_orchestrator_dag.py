@@ -3,10 +3,14 @@ from airflow.operators.python import PythonOperator
 from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.mysql.hooks.mysql import MySqlHook
 from airflow.sensors.external_task import ExternalTaskSensor
-from airflow.utils.dates import days_ago
 from airflow.models import Variable
-from datetime import timedelta
+from datetime import datetime, timedelta
 import json
+import os
+from dotenv import load_dotenv
+from pymongo import MongoClient
+
+load_dotenv() 
 
 # === Secrets === #
 SECRET_KEY = os.getenv("SECRET_KEY")  # Must be exactly 32 bytes
@@ -170,26 +174,19 @@ with DAG(
     for node_name, dag_id in NODE_TO_DAG_MAP.items():
 
         trigger = TriggerDagRunOperator(
-            task_id=f"trigger_{node_name.lower()}",
+            task_id=f"run_{node_name.lower()}",
             trigger_dag_id=dag_id,
             conf={
+                "id": "{{ dag_run.conf['id'] }}",
                 "node_name": node_name,
                 "execution_source": "service_orchestrator"
             },
-            wait_for_completion=False,
+            wait_for_completion=True,     
+            poke_interval=60,
+            reset_dag_run=True,           # optional but recommended
             trigger_rule="none_failed"
         )
 
-        wait = ExternalTaskSensor(
-            task_id=f"wait_for_{node_name.lower()}",
-            external_dag_id=dag_id,
-            external_task_id=None,  # waits for DAG completion
-            mode="reschedule",
-            timeout=6 * 60 * 60,
-            poke_interval=60
-        )
-
-        # Dynamically activate only if node exists in blueprint
         trigger.skip_when = lambda context, n=node_name: (
             n not in context["ti"].xcom_pull(
                 task_ids="read_blueprint",
@@ -197,5 +194,6 @@ with DAG(
             )
         )
 
-        previous_task >> trigger >> wait
-        previous_task = wait
+        previous_task >> trigger
+        previous_task = trigger
+
