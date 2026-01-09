@@ -31,6 +31,8 @@ if LOCAL_MODE:
 
 # === CONFIG === #
 LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+TRANSACTION_API_URL = "https://api.docognize.ai/process-instance-transactions"
+TRANSACTION_ID = ""
 MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
 mongo_client = MongoClient(MONGO_URI)
@@ -64,6 +66,76 @@ mongo_client = MongoClient(MONGO_URI)
 mongo_collection = mongo_client["idp"]["LogEntry"]
 
 # --------------------------------------- #
+import os
+import json
+import requests
+
+TRANSACTION_API_URL = "https://api.docognize.ai/process-instance-transactions"
+LOCAL_DOWNLOAD_DIR = "/opt/airflow/downloaded_docs"
+
+def create_process_instance_transaction(current_stage: str, **context):
+    
+    global TRANSACTION_ID
+
+    """
+    Creates a process instance transaction and stores transactionId in tid.json
+    """
+
+    process_instance_id = context["dag_run"].conf.get("id")
+    if not process_instance_id:
+        raise ValueError("Missing process_instance_id in dag_run.conf")
+
+    payload = {
+        "currentStage": current_stage,
+        "isDeleted": False,
+        "isActive": True,
+        "processInstancesId": process_instance_id
+    }
+
+    response = requests.post(
+        TRANSACTION_API_URL,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=15
+    )
+    response.raise_for_status()
+
+    response_data = response.json()
+
+    # Adjust key if backend uses a different field name
+    transaction_id = (
+        response_data.get("transactionId")
+        or response_data.get("id")
+    )
+
+    if not transaction_id:
+        raise ValueError("transactionId not found in API response")
+
+    process_instance_dir = os.path.join(
+        LOCAL_DOWNLOAD_DIR,
+        f"process-instance-{process_instance_id}"
+    )
+    os.makedirs(process_instance_dir, exist_ok=True)
+
+    tid_path = os.path.join(process_instance_dir, "tid.json")
+    with open(tid_path, "w") as f:
+        json.dump(
+            {
+                "processInstanceId": process_instance_id,
+                "transactionId": transaction_id,
+                "stage": current_stage
+            },
+            f,
+            indent=2
+        )
+
+    print(f"✅ Transaction created: {transaction_id}")
+    print(f"📝 Saved to {tid_path}")
+
+    return transaction_id
+    TRANSACTION_ID = transaction_id
+# --------------------------------------- #
+
 def wait_for_dag_completion(dag_id, run_id, poll_interval=20, timeout=6*60*60):
     start = time.time()
 
@@ -148,9 +220,9 @@ def trigger_child_dag(dag_id, process_instance_id, parent_node_name):
 
     return run_id
 
-def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
+def log_to_mongo(transaction_id, node_name, message, log_type=1, remark=""):
     mongo_collection.insert_one({
-        "processInstanceId": process_instance_id,
+        "id": transaction_id,
         "nodeName": node_name,
         "logsDescription": message,
         "logType": log_type,
@@ -227,7 +299,7 @@ def build_execution_plan(**context):
     # -------- VALIDATION (CRITICAL) -------- #
     if not blueprint:
         log_to_mongo(
-            process_instance_id,
+            TRANSACTION_ID,
             "Service-Orchestrator",
             "Blueprint is missing or empty",
             log_type=1
@@ -236,7 +308,7 @@ def build_execution_plan(**context):
 
     if not nodes:
         log_to_mongo(
-            process_instance_id,
+            TRANSACTION_ID,
             "Service-Orchestrator",
             "Nodes JSON is missing or empty",
             log_type=1
@@ -245,7 +317,7 @@ def build_execution_plan(**context):
 
     if edges is None:
         log_to_mongo(
-            process_instance_id,
+            TRANSACTION_ID,
             "Service-Orchestrator",
             "Edges JSON is missing (NULL)",
             log_type=1
@@ -253,7 +325,7 @@ def build_execution_plan(**context):
         raise ValueError("Edges JSON is missing")
 
     log_to_mongo(
-        process_instance_id,
+        TRANSACTION_ID,
         "Service-Orchestrator",
         "Building execution plan (router-aware)",
         log_type=0
@@ -299,7 +371,7 @@ def build_execution_plan(**context):
             parallel_targets = outgoing.get(node_id, [])
 
             log_to_mongo(
-                process_instance_id,
+                TRANSACTION_ID,
                 "Router",
                 f"Router detected → parallel split to node IDs {parallel_targets}",
                 log_type=3
@@ -348,7 +420,7 @@ def build_execution_plan(**context):
     ti.xcom_push(key="execution_plan", value=execution_plan)
 
     log_to_mongo(
-        process_instance_id,
+        TRANSACTION_ID,
         "Service-Orchestrator",
         f"Execution plan created successfully: {execution_plan}",
         log_type=2
@@ -368,7 +440,7 @@ def execute_execution_plan(**context):
     )
 
     log_to_mongo(
-        process_instance_id,
+        TRANSACTION_ID,
         "Service-Orchestrator",
         f"Execution plan received: {execution_plan}",
         log_type=0
@@ -384,7 +456,7 @@ def execute_execution_plan(**context):
 
             if node not in NODE_TO_DAG_MAP:
                 log_to_mongo(
-                    process_instance_id,
+                    TRANSACTION_ID,
                     "Service-Orchestrator",
                     f"No DAG mapped for node '{node}', skipping",
                     log_type=3
@@ -405,7 +477,7 @@ def execute_execution_plan(**context):
         # ---------- PARALLEL ----------
         elif step["type"] == "parallel":
             log_to_mongo(
-                process_instance_id,
+                TRANSACTION_ID,
                 "Router",
                 f"Parallel split {step['nodes']}",
                 log_type=3
@@ -416,7 +488,7 @@ def execute_execution_plan(**context):
             for node in step["nodes"]:
                 if node not in NODE_TO_DAG_MAP:
                     log_to_mongo(
-                        process_instance_id,
+                        TRANSACTION_ID,
                         "Service-Orchestrator",
                         f"No DAG mapped for node '{node}', skipping",
                         log_type=3
@@ -437,7 +509,7 @@ def execute_execution_plan(**context):
 
 
             log_to_mongo(
-                process_instance_id,
+                TRANSACTION_ID,
                 "Router",
                 "Parallel branches triggered",
                 log_type=2
@@ -453,6 +525,12 @@ with DAG(
     schedule=None,
     catchup=False
 ) as dag:
+
+    create_tid = PythonOperator(
+        task_id="create_process_instance_transaction",
+        python_callable=create_process_instance_transaction,
+        op_kwargs={"current_stage": "Ingestion"},
+    )
 
     read_graph = PythonOperator(
         task_id="read_blueprint_and_graph",

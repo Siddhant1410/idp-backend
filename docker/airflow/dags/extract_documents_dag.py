@@ -169,6 +169,31 @@ def classify_text_for_field(field_name, text, threshold=0.3):
 
     return best_val if best_score >= threshold else None
 
+# ---------------- Get Transaction ID ----------------
+def get_transaction_id(process_instance_id: int) -> str:
+    """
+    Reads transactionId from tid.json for a given process instance
+    """
+
+    tid_path = os.path.join(
+        LOCAL_DOWNLOAD_DIR,
+        f"process-instance-{process_instance_id}",
+        "tid.json"
+    )
+
+    if not os.path.exists(tid_path):
+        raise FileNotFoundError(f"tid.json not found for processInstanceId={process_instance_id}")
+
+    with open(tid_path, "r") as f:
+        data = json.load(f)
+
+    transaction_id = data.get("transactionId")
+    if not transaction_id:
+        raise ValueError("transactionId missing in tid.json")
+
+    return transaction_id
+
+# ---------------- Get Auth Token ----------------
 def get_auth_token():
     """Get JWT token from Airflow API"""
     auth_url = f"{AIRFLOW_API_URL.replace('/api/v2', '')}/auth/token"
@@ -181,10 +206,10 @@ def get_auth_token():
     response.raise_for_status()
     return response.json()["access_token"]
 
-def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
+def log_to_mongo(transaction_id, node_name, message, log_type=1, remark=""):
     try:
         log_entry = {
-            "processInstanceId": process_instance_id,
+            "id": transaction_id,
             "nodeName": node_name,
             "logsDescription": message,
             "logType": log_type,  # 0=info, 1=error, 2=success, 3=warning
@@ -213,7 +238,8 @@ def extract_text_from_pdf(pdf_path):
         return texts
     except Exception as e:
         print(f"❌ OCR failed for {pdf_path}: {e}")
-        log_to_mongo(process_instance_id, message = f"OCR failed for {pdf_path}: {e}", node_name = "Extraction", log_type=1)
+        transaction_id = get_transaction_id(process_instance_id)
+        log_to_mongo(transaction_id, message = f"OCR failed for {pdf_path}: {e}", node_name = "Extraction", log_type=1)
         return []
 
 def correct_typos_with_genai(extracted_data):
@@ -239,12 +265,14 @@ def correct_typos_with_genai(extracted_data):
         return json.loads(content)
     except Exception as e:
         print(f"❌ GenAI typo correction failed: {e}")
-        log_to_mongo(process_instance_id, message = f"GenAI typo correction failed: {e}", node_name = "Extraction", log_type=1)
+        transaction_id = get_transaction_id(process_instance_id)
+        log_to_mongo(transaction_id, message = f"GenAI typo correction failed: {e}", node_name = "Extraction", log_type=1)
         return extracted_data
 
 def extract_fields_from_documents(**context):
     # Get process instance ID from DAG run configuration
     process_instance_id = context["dag_run"].conf.get("id")
+    transaction_id = get_transaction_id(process_instance_id)
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
     
@@ -263,14 +291,14 @@ def extract_fields_from_documents(**context):
     # Load blueprint
     if not os.path.exists(BLUEPRINT_PATH):
         raise FileNotFoundError(f"❌ Missing blueprint.json at {BLUEPRINT_PATH}")
-        log_to_mongo(process_instance_id, message = f"Missing blueprint.json at {BLUEPRINT_PATH}", node_name = "Extraction", log_type=1)
+        log_to_mongo(transaction_id, message = f"Missing blueprint.json at {BLUEPRINT_PATH}", node_name = "Extraction", log_type=1)
     with open(BLUEPRINT_PATH, "r") as f:
         blueprint = json.load(f)
 
     # Load classification results
     if not os.path.exists(CLASSIFIED_JSON_PATH):
         raise FileNotFoundError("❌ classified_documents.json not found.")
-        log_to_mongo(process_instance_id, message = f"classified_documents.json not found.", node_name = "Extraction", log_type=1)
+        log_to_mongo(transaction_id, message = f"classified_documents.json not found.", node_name = "Extraction", log_type=1)
     with open(CLASSIFIED_JSON_PATH, "r") as f:
         classified_docs = json.load(f)
 
@@ -286,7 +314,7 @@ def extract_fields_from_documents(**context):
     extract_node = next((n for n in blueprint if n["nodeName"].lower() == "extract"), None)
     if not extract_node:
         raise ValueError("❌ No extract node found in blueprint.")
-        log_to_mongo(process_instance_id, message = f"No extract node found in blueprint.", node_name = "Extraction", log_type=1)
+        log_to_mongo(transaction_id, message = f"No extract node found in blueprint.", node_name = "Extraction", log_type=1)
 
     rules = extract_node["component"]
     categories = {c["documentType"].lower(): c["id"] for c in rules["categories"]}
@@ -299,14 +327,14 @@ def extract_fields_from_documents(**context):
         doc_path = os.path.join(process_instance_dir_path, file_name)
         if not os.path.exists(doc_path):
             print(f"⚠️ File not found: {file_name}")
-            log_to_mongo(process_instance_id, message = f"File not found: {file_name}", node_name = "Extraction", log_type=3)
+            log_to_mongo(transaction_id, message = f"File not found: {file_name}", node_name = "Extraction", log_type=3)
             continue
 
         doc_type_lower = doc_type.lower()
         doc_type_id = categories.get(doc_type_lower)
         if not doc_type_id or str(doc_type_id) not in extractor_fields:
             print(f"⚠️ No extraction rules for {doc_type}")
-            log_to_mongo(process_instance_id, message = f"No extraction rules for {doc_type}", node_name = "Extraction", log_type=3)
+            log_to_mongo(transaction_id, message = f"No extraction rules for {doc_type}", node_name = "Extraction", log_type=3)
             continue
 
         ocr_text = extract_text_from_pdf(doc_path)
@@ -329,7 +357,7 @@ def extract_fields_from_documents(**context):
                     extracted[field_var] = val if val else "Not Found"
             except Exception as e:
                 print(f"❌ ML extraction failed for {file_name}: {e}")
-                log_to_mongo(process_instance_id, message = f"ML extraction failed for {file_name}: {e}", node_name = "Extraction", log_type=1)
+                log_to_mongo(transaction_id, message = f"ML extraction failed for {file_name}: {e}", node_name = "Extraction", log_type=1)
         else:
             # Run GenAI-based extraction
             print(f"🤖 Using GenAI extractor for {file_name} ({doc_type})")
@@ -377,7 +405,7 @@ def extract_fields_from_documents(**context):
 
                     except Exception as e:
                         print(f"⚠️ Error extracting {field_name} from page {page_num}: {e}")
-                        log_to_mongo(process_instance_id, message = f"Error extracting {field_name} from page {page_num}: {e}", node_name = "Extraction", log_type=1)
+                        log_to_mongo(transaction_id, message = f"Error extracting {field_name} from page {page_num}: {e}", node_name = "Extraction", log_type=1)
                         extracted[field_name] = f"Error: {e}"
                         break
 
@@ -395,14 +423,14 @@ def extract_fields_from_documents(**context):
     with open(EXTRACTED_FIELDS_PATH, "w") as f:
         json.dump(structured_results, f, indent=2)
     print(f"✅ Saved raw extracted_fields.json")
-    log_to_mongo(process_instance_id, message = f"Saved raw extracted_fields.json", node_name = "Extraction", log_type=2)
+    log_to_mongo(transaction_id, message = f"Saved raw extracted_fields.json", node_name = "Extraction", log_type=2)
 
     # Run GenAI-based typo correction
     cleaned_data = correct_typos_with_genai(structured_results)
     with open(CLEANED_FIELDS_PATH, "w") as f:
         json.dump(cleaned_data, f, indent=2)
     print(f"✅ Saved cleaned_extracted_fields.json")
-    log_to_mongo(process_instance_id, message = f"Saved cleaned_extracted_fields.json", node_name = "Extraction", log_type=2)
+    log_to_mongo(transaction_id, message = f"Saved cleaned_extracted_fields.json", node_name = "Extraction", log_type=2)
 
     # Trigger validate_documents_dag
     if AUTO_EXECUTE_NEXT_NODE == 1:
@@ -423,7 +451,7 @@ def extract_fields_from_documents(**context):
         response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
         response.raise_for_status()
         print(f"✅ Successfully triggered validate_fields_dag with ID {process_instance_id}")
-        log_to_mongo(process_instance_id, message = f"Successfully triggered validate_fields_dag with ID {process_instance_id}", node_name = "Extraction", log_type=2)
+        log_to_mongo(transaction_id, message = f"Successfully triggered validate_fields_dag with ID {process_instance_id}", node_name = "Extraction", log_type=2)
 
 
 # === DAG DEFINITION ===

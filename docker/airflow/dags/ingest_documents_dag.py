@@ -18,7 +18,7 @@ load_dotenv()
 
 # === Secrets === #
 SECRET_KEY = os.getenv("SECRET_KEY")  # Must be exactly 32 bytes
-MONGO_URI = os.getenv("MONGO_URI")
+MONGO_URI = os.getenv("MONGO_URI") 
 INGESTION_URL = os.getenv("UI_PORTAL_INGESTION_URL") #Ingestion URL of UI portal
 
 # === DAG Trigger CONFIG === #
@@ -37,6 +37,29 @@ MONGO_DB_NAME = "idp"
 MONGO_COLLECTION = "LogEntry"
 mongo_client = MongoClient(MONGO_URI)
 mongo_collection = mongo_client[MONGO_DB_NAME][MONGO_COLLECTION]
+
+def get_transaction_id(process_instance_id: int) -> str:
+    """
+    Reads transactionId from tid.json for a given process instance
+    """
+
+    tid_path = os.path.join(
+        LOCAL_DOWNLOAD_DIR,
+        f"process-instance-{process_instance_id}",
+        "tid.json"
+    )
+
+    if not os.path.exists(tid_path):
+        raise FileNotFoundError(f"tid.json not found for processInstanceId={process_instance_id}")
+
+    with open(tid_path, "r") as f:
+        data = json.load(f)
+
+    transaction_id = data.get("transactionId")
+    if not transaction_id:
+        raise ValueError("transactionId missing in tid.json")
+
+    return transaction_id
 
 def fix_base64_padding(s: str) -> str:
     return s + '=' * (-len(s) % 4)
@@ -63,10 +86,10 @@ def decrypt_password(encrypted_base64: str, secret_key: bytes) -> str:
 
         raise
 
-def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
+def log_to_mongo(transaction_id, node_name, message, log_type=1, remark=""):
     try:
         log_entry = {
-            "processInstanceId": process_instance_id,
+            "id": transaction_id,
             "nodeName": node_name,
             "logsDescription": message,
             "logType": log_type,  # 0=info, 1=error, 2=success, 3=warning
@@ -80,8 +103,8 @@ def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark="")
     except Exception as mongo_err:
         print(f"⚠️ Failed to log to MongoDB: {mongo_err}")
 
-def log_success(process_instance_id, step, msg):
-    log_to_mongo(process_instance_id, step, msg, node_name = "Ingestion", log_type=2)
+def log_success(transaction_id, step, msg):
+    log_to_mongo(transaction_id, step, msg, node_name = "Ingestion", log_type=2)
 
 def get_auth_token():
     """Get JWT token from Airflow API"""
@@ -147,8 +170,9 @@ def fetch_blueprint_and_download_docs(**context):
         """, ("Ingestion", 1, process_instance_id))
         conn.commit()
 
+        transaction_id = get_transaction_id(process_instance_id)
         log_to_mongo(
-            process_instance_id,
+            transaction_id,
             "Ingestion",
             "ProcessInstance stage updated to 'Ingestion'",
             log_type=2
@@ -197,8 +221,9 @@ def fetch_blueprint_and_download_docs(**context):
                 with open(file_path, "wb") as f:
                     ftp.retrbinary(f"RETR {file_name}", f.write)
 
+                transaction_id = get_transaction_id(process_instance_id)
                 log_to_mongo(
-                    process_instance_id,
+                    transaction_id,
                     "Ingestion",
                     f"Downloaded {file_name}",
                     log_type=2
@@ -227,8 +252,9 @@ def fetch_blueprint_and_download_docs(**context):
                         for chunk in r.iter_content(chunk_size=8192):
                             f.write(chunk)
 
+                transaction_id = get_transaction_id(process_instance_id)
                 log_to_mongo(
-                    process_instance_id,
+                    transaction_id,
                     "Ingestion",
                     f"Downloaded {file_name}",
                     log_type=2
@@ -241,8 +267,9 @@ def fetch_blueprint_and_download_docs(**context):
         conn.rollback()
         AUTO_EXECUTE_NEXT_NODE = 0
 
+        transaction_id = get_transaction_id(process_instance_id)
         log_to_mongo(
-            process_instance_id,
+            transaction_id,
             "Ingestion",
             str(e),
             log_type=1,

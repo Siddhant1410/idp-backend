@@ -220,11 +220,33 @@ def classify_document_ml(
     print(f"⚠️ {os.path.basename(file_path)} → Unknown")
     return "Unknown"
 # ============================
+def get_transaction_id(process_instance_id: int) -> str:
+    """
+    Reads transactionId from tid.json for a given process instance
+    """
 
-def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
+    tid_path = os.path.join(
+        LOCAL_DOWNLOAD_DIR,
+        f"process-instance-{process_instance_id}",
+        "tid.json"
+    )
+
+    if not os.path.exists(tid_path):
+        raise FileNotFoundError(f"tid.json not found for processInstanceId={process_instance_id}")
+
+    with open(tid_path, "r") as f:
+        data = json.load(f)
+
+    transaction_id = data.get("transactionId")
+    if not transaction_id:
+        raise ValueError("transactionId missing in tid.json")
+
+    return transaction_id
+
+def log_to_mongo(transaction_id, node_name, message, log_type=1, remark=""):
     try:
         log_entry = {
-            "processInstanceId": process_instance_id,
+            "id": transaction_id,
             "nodeName": node_name,
             "logsDescription": message,
             "logType": log_type,  # 0=info, 1=error, 2=success, 3=warning
@@ -261,11 +283,13 @@ def extract_text_per_page(pdf_path, max_pages=10):
             yield text
     except Exception as e:
         print(f"❌ OCR failed for {pdf_path}: {e}")
-        log_to_mongo(process_instance_id, message = f"OCR failed for {pdf_path}: {e}", node_name = "Classification", log_type=1)
+        transaction_id = get_transaction_id(process_instance_id)
+        log_to_mongo(transaction_id, message = f"OCR failed for {pdf_path}: {e}", node_name = "Classification", log_type=1)
         return
 
 def classify_documents(**context):
     process_instance_id = context["dag_run"].conf.get("id")
+    transaction_id = get_transaction_id(process_instance_id)
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
 
@@ -279,7 +303,7 @@ def classify_documents(**context):
     try:
         if not os.path.exists(blueprint_path):
             raise FileNotFoundError(f"❌ blueprint.json not found at {blueprint_path}. Please run ingestion DAG first.")
-            log_to_mongo(process_instance_id, message = f" blueprint.json not found at {blueprint_path}. Please run ingestion DAG first.", node_name = "Classification", log_type=1)
+            log_to_mongo(transaction_id, message = f" blueprint.json not found at {blueprint_path}. Please run ingestion DAG first.", node_name = "Classification", log_type=1)
 
         with open(blueprint_path, "r") as f:
             blueprint = json.load(f)
@@ -296,17 +320,17 @@ def classify_documents(**context):
         )
         conn.commit()
         print(f"🟢 ProcessInstances updated → currentStage='Classification', isInstanceRunning=1 for process_instance_id={process_instance_id}")
-        log_to_mongo(process_instance_id, message = f"ProcessInstances updated → currentStage='Classification', isInstanceRunning=1 for process_instance_id={process_instance_id}", node_name = "Classification", log_type=2)
+        log_to_mongo(transaction_id, message = f"ProcessInstances updated → currentStage='Classification', isInstanceRunning=1 for process_instance_id={process_instance_id}", node_name = "Classification", log_type=2)
 
         classify_node = next((n for n in blueprint if n["nodeName"].lower() == "classify"), None)
         if not classify_node:
             raise ValueError("Classification node not found in blueprint")
-            log_to_mongo(process_instance_id, message = f"Classification node not found in blueprint", node_name = "Classification", log_type=1)
+            log_to_mongo(transaction_id, message = f"Classification node not found in blueprint", node_name = "Classification", log_type=1)
 
         categories = classify_node["component"].get("categories", [])
         if not categories:
             raise ValueError("No categories found in Classify component")
-            log_to_mongo(process_instance_id, message = f"No categories found in Classify component", node_name = "Classification", log_type=1)
+            log_to_mongo(transaction_id, message = f"No categories found in Classify component", node_name = "Classification", log_type=1)
 
         target_labels = [c["documentType"] for c in categories]
         label_str = ", ".join(target_labels)
@@ -328,7 +352,7 @@ def classify_documents(**context):
                 """, (doc_type,))
         conn.commit()
         print("✅ DocumentType table updated → isActive=1 for target document types")
-        log_to_mongo(process_instance_id, message = f"No categories found in Classify component", node_name = "Classification", log_type=2)
+        log_to_mongo(transaction_id, message = f"No categories found in Classify component", node_name = "Classification", log_type=2)
 
         for file_name in os.listdir(process_instance_dir_path):
             if not file_name.endswith(".pdf"):
@@ -343,7 +367,7 @@ def classify_documents(**context):
 
             if use_ml:
                 print("🧠 Using ML classifier (embeddings → TF-IDF fallback)")
-                log_to_mongo(process_instance_id, node_name="Classification",
+                log_to_mongo(transaction_id, node_name="Classification",
                             message="Using ML classifier (vectors pipeline)", log_type=0)
                 # Preload/validate vector assets once (raises if missing)
                 try:
@@ -351,11 +375,11 @@ def classify_documents(**context):
                 except Exception as e:
                     err = f"ML assets not available: {e}"
                     print(f"❌ {err}")
-                    log_to_mongo(process_instance_id, node_name="Classification", message=err, log_type=1)
+                    log_to_mongo(transaction_id, node_name="Classification", message=err, log_type=1)
                     raise
             else:
                 print("🤖 Using GENAI classifier")
-                log_to_mongo(process_instance_id, node_name="Classification",
+                log_to_mongo(transaction_id, node_name="Classification",
                             message="Using GENAI classifier", log_type=0)
 
             try:
@@ -372,7 +396,7 @@ def classify_documents(**context):
                     )
                     results[file_name] = classification
                     print(f"✅ {file_name} → {classification} (ML)")
-                    log_to_mongo(process_instance_id,
+                    log_to_mongo(transaction_id,
                                 message=f"{file_name} → {classification} (ML)",
                                 node_name="Classification",
                                 log_type=2 if classification != 'Unknown' else 3)
@@ -399,22 +423,22 @@ def classify_documents(**context):
 
                     classification = response.choices[0].message.content.strip()
                     print(f"🔍 Page {page_number}: classified as {classification}")
-                    log_to_mongo(process_instance_id, message = f"Page {page_number}: classified as {classification}", node_name = "Classification", log_type=2)
+                    log_to_mongo(transaction_id, message = f"Page {page_number}: classified as {classification}", node_name = "Classification", log_type=2)
 
                     if classification in target_labels:
                         results[file_name] = classification
                         print(f"✅ {file_name} → {classification} (stopped early at page {page_number})")
-                        log_to_mongo(process_instance_id, message = f"{file_name} → {classification} (stopped early at page {page_number})", node_name = "Classification", log_type=2)
+                        log_to_mongo(transaction_id, message = f"{file_name} → {classification} (stopped early at page {page_number})", node_name = "Classification", log_type=2)
                         break
                 else:
                     results[file_name] = "Unknown"
                     print(f"⚠️ {file_name} → Unable to classify after scanning max pages")
-                    log_to_mongo(process_instance_id, message = f"{file_name} → Unable to classify after scanning max pages", node_name = "Classification", log_type=3)
+                    log_to_mongo(transaction_id, message = f"{file_name} → Unable to classify after scanning max pages", node_name = "Classification", log_type=3)
 
             except Exception as e:
                 results[file_name] = f"Error: {e}"
                 print(f"❌ {file_name} → {e}")
-                log_to_mongo(process_instance_id, message = f"{file_name} → {e}", node_name = "Classification", log_type=1)
+                log_to_mongo(transaction_id, message = f"{file_name} → {e}", node_name = "Classification", log_type=1)
 
         with open(os.path.join(process_instance_dir_path, "classified_documents.json"), "w") as f:
             json.dump(results, f)
@@ -447,16 +471,16 @@ def classify_documents(**context):
             response = requests.post(trigger_url, json=payload, headers=headers, timeout=10)
             response.raise_for_status()
             print(f"✅ Successfully triggered extract_documents_dag with ID {process_instance_id}")
-            log_to_mongo(process_instance_id, message = f"Successfully triggered extract_documents_dag with ID {process_instance_id}", node_name = "Classification", log_type=2)
+            log_to_mongo(transaction_id, message = f"Successfully triggered extract_documents_dag with ID {process_instance_id}", node_name = "Classification", log_type=2)
 
     except Exception as e:
         conn.rollback()
         error_message = f"{type(e).__name__}: {str(e)}"
         print(f"❌ Error in classification process: {error_message}")
-        log_to_mongo(process_instance_id, message = f"Error in classification process: {error_message}", node_name = "Classification", log_type=1)
+        log_to_mongo(transaction_id, message = f"Error in classification process: {error_message}", node_name = "Classification", log_type=1)
 
         log_to_mongo(
-            process_instance_id=process_instance_id,
+            id=transaction_id,
             node_name="Classification",
             message=error_message,
             log_type=1,

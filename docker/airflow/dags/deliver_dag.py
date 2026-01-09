@@ -46,10 +46,33 @@ def decrypt_password(encrypted_base64: str, secret_key: bytes) -> str:
     plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
     return plaintext.decode('utf-8')
 
-def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
+def get_transaction_id(process_instance_id: int) -> str:
+    """
+    Reads transactionId from tid.json for a given process instance
+    """
+
+    tid_path = os.path.join(
+        LOCAL_DOWNLOAD_DIR,
+        f"process-instance-{process_instance_id}",
+        "tid.json"
+    )
+
+    if not os.path.exists(tid_path):
+        raise FileNotFoundError(f"tid.json not found for processInstanceId={process_instance_id}")
+
+    with open(tid_path, "r") as f:
+        data = json.load(f)
+
+    transaction_id = data.get("transactionId")
+    if not transaction_id:
+        raise ValueError("transactionId missing in tid.json")
+
+    return transaction_id
+
+def log_to_mongo(transaction_id, node_name, message, log_type=1, remark=""):
     try:
         log_entry = {
-            "processInstanceId": process_instance_id,
+            "id": transaction_id,
             "nodeName": node_name,
             "logsDescription": message,
             "logType": log_type,  # 0=info, 1=error, 2=success, 3=warning
@@ -66,6 +89,7 @@ def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark="")
 # === Deliver Logic ===
 def deliver_documents(**context):
     process_instance_id = context["dag_run"].conf.get("id")
+    transaction_id = get_transaction_id(process_instance_id)
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
     
@@ -80,14 +104,14 @@ def deliver_documents(**context):
 
     if not os.path.exists(BLUEPRINT_PATH):
         raise FileNotFoundError("❌ blueprint.json not found locally")
-        log_to_mongo(process_instance_id, message = "blueprint.json not found locally", node_name = "Deliver", log_type=1)
+        log_to_mongo(transaction_id, message = "blueprint.json not found locally", node_name = "Deliver", log_type=1)
     with open(BLUEPRINT_PATH, "r") as f:
         blueprint_json = json.load(f)
 
     deliver_node = next((n for n in blueprint_json if n.get("nodeName", "").lower() == "deliver"), None)
     if not deliver_node:
         raise ValueError("Deliver node not found in blueprint")
-        log_to_mongo(process_instance_id, message = "Deliver node not found in blueprint", node_name = "Deliver", log_type=1)
+        log_to_mongo(transaction_id, message = "Deliver node not found in blueprint", node_name = "Deliver", log_type=1)
         
 
     component = deliver_node.get("component", {})
@@ -114,7 +138,7 @@ def deliver_documents(**context):
 
         if not all([ftp_host, ftp_username, ftp_encrypted_password, ftp_path]):
             raise ValueError("Incomplete FTP details in blueprint")
-            log_to_mongo(process_instance_id, message = "Incomplete FTP details in blueprint", node_name = "Deliver", log_type=1)
+            log_to_mongo(transaction_id, message = "Incomplete FTP details in blueprint", node_name = "Deliver", log_type=1)
 
         ftp_password = decrypt_password(ftp_encrypted_password, SECRET_KEY)
         remote_folder_path = f"{ftp_path}process-instance-{process_instance_id}"
@@ -122,7 +146,7 @@ def deliver_documents(**context):
         with FTP(ftp_host) as ftp:
             ftp.login(user=ftp_username, passwd=ftp_password)
             print(f"✅ Connected to FTP: {ftp_host}")
-            log_to_mongo(process_instance_id, message = f"Connected to FTP: {ftp_host}", node_name = "Deliver", log_type=2)
+            log_to_mongo(transaction_id, message = f"Connected to FTP: {ftp_host}", node_name = "Deliver", log_type=2)
 
             # Navigate and create folders
             for folder in remote_folder_path.strip("/").split("/"):
@@ -136,14 +160,14 @@ def deliver_documents(**context):
                     with open(local_file_path, "rb") as f:
                         ftp.storbinary(f"STOR {filename}", f)
                         print(f"📤 Uploaded: {filename}")
-                        log_to_mongo(process_instance_id, message = f"Uploaded: {filename}", node_name = "Deliver", log_type=2)
+                        log_to_mongo(transaction_id, message = f"Uploaded: {filename}", node_name = "Deliver", log_type=2)
                         uploaded_count += 1
 
     elif channel_type in ["http", "https"]:
         post_url = component.get("url")
         if not post_url:
             raise ValueError("HTTP/HTTPS URL missing in deliver blueprint")
-            log_to_mongo(process_instance_id, message = f"HTTP/HTTPS URL missing in deliver blueprint", node_name = "Deliver", log_type=1)
+            log_to_mongo(transaction_id, message = f"HTTP/HTTPS URL missing in deliver blueprint", node_name = "Deliver", log_type=1)
 
         for filename in os.listdir(process_instance_dir_path):
             if filename.endswith(".pdf"):
@@ -153,7 +177,7 @@ def deliver_documents(**context):
                     response = requests.post(post_url, files=files, timeout=30)
                     response.raise_for_status()
                     print(f"📤 Posted: {filename}")
-                    log_to_mongo(process_instance_id, message = f"Posted: {filename}", node_name = "Deliver", log_type=2)
+                    log_to_mongo(transaction_id, message = f"Posted: {filename}", node_name = "Deliver", log_type=2)
                     uploaded_count += 1
     
     elif channel_type == "workflow":
@@ -162,12 +186,11 @@ def deliver_documents(**context):
 
         if not workflow_id:
             raise ValueError("Workflow ID missing in deliver blueprint")
-            log_to_mongo(process_instance_id, message="Workflow ID missing in deliver blueprint", node_name="Deliver", log_type=1)
-
+            log_to_mongo(transaction_id, message="Workflow ID missing in deliver blueprint", node_name="Deliver", log_type=1)
         deliver_api_url = "https://api.docognize.ai/process-instances/deliver-to-workflow" 
         if not deliver_api_url:
             raise ValueError("DELIVER_TO_WORKFLOW_URL environment variable not set")
-            log_to_mongo(process_instance_id, message="DELIVER_TO_WORKFLOW_URL not set", node_name="Deliver", log_type=1)
+            log_to_mongo(transaction_id, message="DELIVER_TO_WORKFLOW_URL not set", node_name="Deliver", log_type=1)
 
         payload = {
             "processInstanceId": process_instance_id,
@@ -180,18 +203,18 @@ def deliver_documents(**context):
             response = requests.post(deliver_api_url, json=payload, timeout=30)
             response.raise_for_status()
 
-            print(f"✅ Successfully delivered processInstanceId {process_instance_id} to workflow {workflow_name}")
+            print(f"✅ Successfully delivered transactionId {transaction_id} to workflow {workflow_name}")
             log_to_mongo(
-                process_instance_id,
+                transaction_id,
                 node_name="Deliver",
-                message=f"Delivered processInstanceId {process_instance_id} to workflow {workflow_name} ({workflow_id})",
+                message=f"Delivered transactionId {transaction_id} to workflow {workflow_name} ({workflow_id})",
                 log_type=2
             )
 
         except requests.exceptions.RequestException as e:
             print(f"❌ Failed to deliver to workflow: {str(e)}")
             log_to_mongo(
-                process_instance_id,
+                transaction_id,
                 node_name="Deliver",
                 message=f"Failed to deliver to workflow {workflow_name}: {str(e)}",
                 log_type=1
@@ -200,14 +223,13 @@ def deliver_documents(**context):
 
     else:
         raise ValueError(f"Unsupported channelType in deliver node: {channel_type}")
-        log_to_mongo(process_instance_id, message = f"Unsupported channelType in deliver node: {channel_type}", node_name = "Deliver", log_type=1)
-
+        log_to_mongo(transaction_id, message = f"Unsupported channelType in deliver node: {channel_type}", node_name = "Deliver", log_type=1)
     print(f"✅ Delivered {uploaded_count} documents via {channel_type.upper()}")
-    log_to_mongo(process_instance_id, message = f"Delivered {uploaded_count} documents via {channel_type.upper()}", node_name = "Deliver", log_type=2)
+    log_to_mongo(transaction_id, message = f"Delivered {uploaded_count} documents via {channel_type.upper()}", node_name = "Deliver", log_type=2)
 
     if not os.path.exists(RESPONSE_BODY_PATH):
         raise FileNotFoundError("❌ cleaned_extracted_fields.json not found")
-        log_to_mongo(process_instance_id, message = f"cleaned_extracted_fields.json not found", node_name = "Deliver", log_type=1)
+        log_to_mongo(transaction_id, message = f"cleaned_extracted_fields.json not found", node_name = "Deliver", log_type=1)
         
     with open(RESPONSE_BODY_PATH, "r") as f:
         response_data = json.load(f)
@@ -228,7 +250,7 @@ def deliver_documents(**context):
 
     conn.commit()
     print(f"✅ Updated {updated_count} ProcessInstanceDocuments records")
-    log_to_mongo(process_instance_id, message = f"Updated {updated_count} ProcessInstanceDocuments records", node_name = "Deliver", log_type=2)
+    log_to_mongo(transaction_id, message = f"Updated {updated_count} ProcessInstanceDocuments records", node_name = "Deliver", log_type=2)
 
     cursor.execute("""
         UPDATE ProcessInstances
@@ -241,7 +263,7 @@ def deliver_documents(**context):
 
     shutil.rmtree(process_instance_dir_path)
     print("✅ Cleaned up local process instance folder.")
-    log_to_mongo(process_instance_id, message = f"Cleaned up local process instance folder.", node_name = "Deliver", log_type=2)
+    log_to_mongo(transaction_id, message = f"Cleaned up local process instance folder.", node_name = "Deliver", log_type=2)
 
 # === DAG Definition ===
 with DAG(

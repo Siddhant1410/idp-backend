@@ -42,10 +42,33 @@ openai_client = track_openai(openai_client, project_name="my-idp-project")
 if not OpenAI.api_key or not OpenAI.api_key.startswith("sk-") and not OpenAI.api_key.startswith("sk-proj-"):
     raise EnvironmentError("❌ OpenAI API key missing or invalid. Please set OPENAI_API_KEY as an environment variable.")
 
-def log_to_mongo(process_instance_id, node_name, message, log_type=1, remark=""):
+def get_transaction_id(process_instance_id: int) -> str:
+    """
+    Reads transactionId from tid.json for a given process instance
+    """
+
+    tid_path = os.path.join(
+        LOCAL_DOWNLOAD_DIR,
+        f"process-instance-{process_instance_id}",
+        "tid.json"
+    )
+
+    if not os.path.exists(tid_path):
+        raise FileNotFoundError(f"tid.json not found for processInstanceId={process_instance_id}")
+
+    with open(tid_path, "r") as f:
+        data = json.load(f)
+
+    transaction_id = data.get("transactionId")
+    if not transaction_id:
+        raise ValueError("transactionId missing in tid.json")
+
+    return transaction_id
+
+def log_to_mongo(transaction_id, node_name, message, log_type=1, remark=""):
     try:
         log_entry = {
-            "processInstanceId": process_instance_id,
+            "id": transaction_id,
             "nodeName": node_name,
             "logsDescription": message,
             "logType": log_type,  # 0=info, 1=error, 2=success, 3=warning
@@ -76,15 +99,17 @@ def extract_text_from_pdf(pdf_path):
         return "".join(pytesseract.image_to_string(img) for img in images)
     except Exception as e:
         print(f"OCR failed for {pdf_path}: {e}")
-        log_to_mongo(process_instance_id, message = f"OCR failed for {pdf_path}: {e}", node_name = "Validation", log_type=1)
+        transaction_id = get_transaction_id(process_instance_id)
+        log_to_mongo(transaction_id, message = f"OCR failed for {pdf_path}: {e}", node_name = "Validation", log_type=1)
         return ""
 
 def highlight_and_upload(**context):
     process_instance_id = context["dag_run"].conf.get("id")
+    transaction_id = get_transaction_id(process_instance_id)
     print("highlight_and_upload() function has started.")
     if not process_instance_id:
         raise ValueError("Missing process_instance_id in dag_run.conf")
-        log_to_mongo(process_instance_id, message = f"Missing process_instance_id in dag_run.conf", node_name = "Validation", log_type=1)
+        log_to_mongo(transaction_id, message = f"Missing process_instance_id in dag_run.conf", node_name = "Validation", log_type=1)
 
     dir_path = os.path.join(LOCAL_DOWNLOAD_DIR, f"process-instance-{process_instance_id}")
     os.makedirs(dir_path, exist_ok=True)
@@ -104,12 +129,11 @@ def highlight_and_upload(**context):
     """, ("Validation", 1, process_instance_id))
     conn.commit()
     print(f"🟢 Updated ProcessInstances to 'Validation' stage for process_instance_id={process_instance_id}")
-    log_to_mongo(process_instance_id, message = f"Updated ProcessInstances to 'Validation' stage for process_instance_id={process_instance_id}", node_name = "Validation", log_type=2)
+    log_to_mongo(transaction_id, message = f"Updated ProcessInstances to 'Validation' stage for process_instance_id={process_instance_id}", node_name = "Validation", log_type=2)
 
     if not os.path.exists(cleaned_fields_path):
         raise FileNotFoundError("cleaned_extracted_fields.json not found")
-        log_to_mongo(process_instance_id, message = f"cleaned_extracted_fields.json not found. Please Run Extraction first.", node_name = "Validation", log_type=1)
-
+        log_to_mongo(transaction_id, message = f"cleaned_extracted_fields.json not found. Please Run Extraction first.", node_name = "Validation", log_type=1)
     with open(cleaned_fields_path, "r") as f:
         extracted_data = json.load(f)
 
@@ -124,7 +148,7 @@ def highlight_and_upload(**context):
                 fields.append({"fieldName": k, "fieldValue": v})
         else:
             print(f"⚠️ Unexpected format for extractedFields: {type(raw_fields)}")
-            log_to_mongo(process_instance_id, message = f"Unexpected format for extractedFields: {type(raw_fields)}", node_name = "Validation", log_type=3)
+            log_to_mongo(transaction_id, message = f"Unexpected format for extractedFields: {type(raw_fields)}", node_name = "Validation", log_type=3)
 
         pid = doc.get("processInstanceId")
 
@@ -176,7 +200,7 @@ def highlight_and_upload(**context):
                     score_sum += score
             except Exception as e:
                 print(f"Validation failed for {field_name}: {e}")
-                log_to_mongo(process_instance_id, message = f"Validation failed for {field_name}: {e}", node_name = "Validation", log_type=1)
+                log_to_mongo(transaction_id, message = f"Validation failed for {field_name}: {e}", node_name = "Validation", log_type=1)
 
         overall_score = round(score_sum / len(validated_fields)) if validated_fields else 0
         doc["extractedFields"] = validated_fields
@@ -184,7 +208,7 @@ def highlight_and_upload(**context):
         with open(cleaned_fields_path, "w") as f:
             json.dump(extracted_data, f, indent=2)
         print(f"✅ Updated extracted_fields with fieldScore in {cleaned_fields_path}")
-        log_to_mongo(process_instance_id, message = f"Updated extracted_fields with fieldScore in {cleaned_fields_path}", node_name = "Validation", log_type=2)
+        log_to_mongo(transaction_id, message = f"Updated extracted_fields with fieldScore in {cleaned_fields_path}", node_name = "Validation", log_type=2)
 
         document_details_json = json.dumps(doc["documentDetails"])
 
@@ -229,7 +253,7 @@ def highlight_and_upload(**context):
         output_pdf = os.path.join(highlighted_dir, document_name)
         highlighted_images[0].save(output_pdf, save_all=True, append_images=highlighted_images[1:], format="PDF")
         print(f"✅ Highlighted PDF saved: {output_pdf}")
-        log_to_mongo(process_instance_id, message = f"Highlighted PDF saved: {output_pdf}", node_name = "Validation", log_type=2)
+        log_to_mongo(transaction_id, message = f"Highlighted PDF saved: {output_pdf}", node_name = "Validation", log_type=2)
 
         with open(output_pdf, "rb") as f:
             response = requests.post(UPLOAD_URL, files={"file": (document_name, f, "application/pdf")})
@@ -265,9 +289,9 @@ def highlight_and_upload(**context):
 
         conn.commit()
         print("✅ Saved extractedFields and fileDetails to DB")
-        log_to_mongo(process_instance_id, message = f"Saved extractedFields and fileDetails to DB", node_name = "Validation", log_type=2)
+        log_to_mongo(transaction_id, message = f"Saved extractedFields and fileDetails to DB", node_name = "Validation", log_type=2)
         print(f"✅ Stored metadata for file with avg score {overall_score}%")
-        log_to_mongo(process_instance_id, message = f"Stored metadata for file with avg score {overall_score}%", node_name = "Validation", log_type=2)
+        log_to_mongo(transaction_id, message = f"Stored metadata for file with avg score {overall_score}%", node_name = "Validation", log_type=2)
 
     if AUTO_EXECUTE_NEXT_NODE == 1:
         token = get_auth_token()
